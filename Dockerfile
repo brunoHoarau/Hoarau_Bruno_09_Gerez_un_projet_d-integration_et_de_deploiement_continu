@@ -15,7 +15,7 @@ WORKDIR /src
 
 RUN ./gradlew build
 
-FROM alpine:3.19 as front
+FROM alpine:3.24 as front
 
 COPY --from=front-build /src/dist/microcrm/browser /app/front
 COPY misc/docker/Caddyfile /app/Caddyfile
@@ -29,7 +29,7 @@ EXPOSE 443
 
 CMD ["/usr/sbin/caddy", "run"]
 
-FROM alpine:3.19 as back
+FROM alpine:3.24 as back
 
 COPY --from=back-build /src/build/libs/microcrm-0.0.1-SNAPSHOT.jar /app/back/microcrm-0.0.1-SNAPSHOT.jar
 
@@ -41,7 +41,7 @@ EXPOSE 4200
 
 CMD ["java", "-jar", "/app/back/microcrm-0.0.1-SNAPSHOT.jar"]
 
-FROM alpine:3.19 as standalone
+FROM alpine:3.24 as standalone
 
 COPY --from=front / /
 COPY --from=back / /
