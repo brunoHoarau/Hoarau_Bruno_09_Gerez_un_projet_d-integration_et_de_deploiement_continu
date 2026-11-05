@@ -3,6 +3,8 @@ plugins {
 	id 'org.springframework.boot' version '3.2.5'
 	id 'io.spring.dependency-management' version '1.1.4'
 	id 'com.adarshr.test-logger' version '4.0.0'
+	id 'jacoco'
+	id 'org.sonarqube' version '7.5.0.8588'
 }
 
 group = 'com.openclassroom.devops.orion'
@@ -28,4 +30,24 @@ dependencies {
 
 test {
     useJUnitPlatform()
+    finalizedBy jacocoTestReport
+}
+
+// Rapport de couverture JaCoCo (XML pour SonarQube Cloud, HTML pour consultation)
+jacocoTestReport {
+    dependsOn test
+    reports {
+        xml.required = true
+        html.required = true
+    }
+}
+
+// Analyse SonarQube Cloud : l'organisation et la clé du projet sont fournies
+// par le pipeline CI (variables GitHub), le jeton par la variable d'environnement SONAR_TOKEN.
+sonar {
+    properties {
+        property 'sonar.host.url', 'https://sonarcloud.io'
+        property 'sonar.coverage.jacoco.xmlReportPaths', "${layout.buildDirectory.get()}/reports/jacoco/test/jacocoTestReport.xml"
+        property 'sonar.qualitygate.wait', 'true'
+    }
 }

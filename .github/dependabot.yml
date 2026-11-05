@@ -1,0 +1,25 @@
+# Mises à jour automatiques des dépendances (plan de sécurité, section 5.3).
+# Chaque mise à jour arrive sous forme de pull request et passe donc par le pipeline CI.
+version: 2
+updates:
+  - package-ecosystem: gradle
+    directory: /back
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /front
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

@@ -1,0 +1,130 @@
+# Pipeline d'intégration continue de MicroCRM
+# Build + tests + couverture + analyse SonarQube Cloud, pour le back-end (Spring Boot / Gradle)
+# et le front-end (Angular / npm). Voir docs/documentation-technique.md, sections 2 et 4.
+
+name: CI
+
+on:
+  # Retour rapide sur toute branche
+  push:
+    branches: ["**"]
+  # Contrôle avant fusion sur main
+  pull_request:
+    branches: [main]
+  # Exécution périodique (nightly) : tests + analyse sur main, même sans modification du code
+  schedule:
+    - cron: "0 2 * * *"
+  # Relance manuelle
+  workflow_dispatch:
+
+# Moindre privilège : lecture seule du dépôt par défaut
+permissions:
+  contents: read
+
+# Une seule exécution par branche/PR : la précédente est annulée si un nouveau commit arrive
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JAVA_VERSION: "21"
+  NODE_VERSION: "24"
+
+jobs:
+  back:
+    name: Back-end (build, tests, SonarQube)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: back
+    env:
+      # Secret jamais affiché : masqué automatiquement dans les logs par GitHub
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    steps:
+      - name: Récupération du code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # historique complet requis par SonarQube (détection du nouveau code)
+
+      - name: Installation de Java ${{ env.JAVA_VERSION }} (Temurin)
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Configuration de Gradle (cache + validation du wrapper)
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Build et tests (JUnit) + couverture (JaCoCo)
+        run: ./gradlew build jacocoTestReport
+
+      - name: Analyse SonarQube Cloud (Quality Gate)
+        if: env.SONAR_TOKEN != ''
+        run: >
+          ./gradlew sonar
+          -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }}
+          -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY_BACK }}
+
+      - name: Publication des rapports de tests et de couverture
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: back-reports
+          path: |
+            back/build/reports/tests/test/
+            back/build/reports/jacoco/test/
+            back/build/test-results/test/
+          retention-days: 14
+
+  front:
+    name: Front-end (build, tests, SonarQube)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: front
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    steps:
+      - name: Récupération du code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Installation de Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+
+      - name: Installation des dépendances (lockfile strict)
+        run: npm ci
+
+      - name: Build de production
+        run: npx ng build
+
+      - name: Tests (Karma / Jasmine, Chrome Headless) + couverture
+        run: npx ng test --watch=false --browsers=ChromeHeadlessNoSandbox --code-coverage
+
+      - name: Audit des dépendances npm (non bloquant)
+        continue-on-error: true
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Analyse SonarQube Cloud (Quality Gate)
+        if: env.SONAR_TOKEN != ''
+        uses: SonarSource/sonarqube-scan-action@v8
+        with:
+          projectBaseDir: front
+          args: >
+            -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }}
+            -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY_FRONT }}
+
+      - name: Publication du rapport de couverture
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: front-coverage
+          path: front/coverage/microcrm/
+          retention-days: 14
