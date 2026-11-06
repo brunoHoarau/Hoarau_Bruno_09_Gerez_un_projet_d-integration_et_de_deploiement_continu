@@ -81,7 +81,7 @@ Dockerfile       Build multi-stage : cibles front, back, standalone
 
 ### 1.5 Présentation rapide du pipeline CI/CD
 
-Le workflow `.github/workflows/ci.yml` exécute en parallèle deux jobs, back-end et front-end. Chacun construit son application, exécute les tests existants, mesure la couverture et soumet le code à SonarQube Cloud, dont la Quality Gate bloque le pipeline en cas d'échec. Les rapports sont publiés en artefacts. Dependabot (`.github/dependabot.yml`) propose chaque semaine les mises à jour de dépendances, qui passent elles-mêmes par le pipeline.
+Le workflow `.github/workflows/ci.yml` exécute en parallèle deux jobs, back-end et front-end. Chacun construit son application, exécute les tests existants, mesure la couverture et soumet le code à SonarQube Cloud, dont la Quality Gate bloque le pipeline en cas d'échec. Les rapports sont publiés en artefacts. Si ces deux jobs réussissent, le job `docker` construit les images, démarre l'application avec Docker Compose, la vérifie (smoke test) et scanne les images avec Trivy. Pour un push sur `main` ou un tag de release `v*`, il publie ensuite les images sur GitHub Container Registry, et le job `deploy` les déploie avec Docker Compose. Dependabot (`.github/dependabot.yml`) propose chaque semaine les mises à jour de dépendances, qui passent elles-mêmes par le pipeline.
 
 ---
 
@@ -90,13 +90,14 @@ Le workflow `.github/workflows/ci.yml` exécute en parallèle deux jobs, back-en
 ### 2.1 Structure du pipeline
 
 ```
-                 ┌───────────────────────────── job "back" ─────────────────────────────┐
- push / PR /     │ checkout → Java 21 → Gradle (cache) → build + tests + JaCoCo         │
- nightly /  ───► │          → SonarQube Cloud (Quality Gate) → artefacts de rapports    │
- manuel          ├───────────────────────────── job "front" ────────────────────────────┤
-                 │ checkout → Node 24 (cache npm) → npm ci → ng build → ng test + lcov  │
-                 │          → npm audit (non bloquant) → SonarQube Cloud → artefacts    │
-                 └──────────────────────────────────────────────────────────────────────┘
+            ┌──────────── job "back" ────────────┐
+ push /     │ build + tests + JaCoCo → SonarQube │──┐
+ tag v* /   └────────────────────────────────────┘  │   ┌────────── job "docker" ──────────┐   ┌──────── job "deploy" ────────┐
+ PR /   ──►                                         ├──►│ compose build → compose up       │──►│ compose pull → compose up    │
+ nightly /  ┌──────────── job "front" ───────────┐  │   │ → smoke test → scan Trivy        │   │ → vérification               │
+ manuel     │ build + tests + lcov → SonarQube   │──┘   │ → push GHCR (main / tag v*)      │   │ (main / tag v* uniquement)   │
+            └────────────────────────────────────┘      └──────────────────────────────────┘   └──────────────────────────────┘
+                        CI                                       CD : livraison                       CD : déploiement
 ```
 
 **Déclencheurs** (conformes au plan de testing, section 4.2) :
@@ -104,13 +105,24 @@ Le workflow `.github/workflows/ci.yml` exécute en parallèle deux jobs, back-en
 | Déclencheur | Configuration |
 |---|---|
 | Push sur toute branche | `push: branches: ["**"]` |
+| Release | `push: tags: ["v*"]` (par exemple `git tag v1.0.0 && git push origin v1.0.0`) |
 | Pull request vers `main` | `pull_request: branches: [main]` |
 | Nightly | `schedule: cron "0 2 * * *"` (tous les jours à 2 h UTC, sur `main`) |
 | Manuel | `workflow_dispatch` |
 
-**Ordre d'exécution** : les jobs `back` et `front` sont **indépendants et parallèles**, ce qui réduit la durée totale. Dans chaque job, les étapes sont séquentielles : un échec de build ou de test arrête le job avant l'analyse SonarQube. Les rapports sont publiés **même en cas d'échec** (`if: always()`) pour faciliter le diagnostic.
+**Ordre d'exécution :**
 
-Les étapes de conteneurisation (build des images, smoke test Docker Compose) et de déploiement seront ajoutées lors des étapes suivantes.
+1. Les jobs `back` et `front` (CI) sont **indépendants et parallèles**, ce qui réduit la durée totale. Dans chaque job, les étapes sont séquentielles : un échec de build ou de test arrête le job avant l'analyse SonarQube. Les rapports sont publiés **même en cas d'échec** (`if: always()`) pour faciliter le diagnostic.
+2. Le job `docker` ne démarre **que si `back` et `front` ont réussi** (`needs: [back, front]`). Il s'exécute à chaque run, mais il ne **publie** les images que pour un push sur `main` ou un tag `v*`.
+3. Le job `deploy` ne démarre que si les images ont été publiées (`needs: docker`), et uniquement sur `main` ou un tag `v*`.
+
+| Événement | back / front | docker (build, smoke test, scan) | Publication GHCR | deploy |
+|---|---|---|---|---|
+| Push sur une branche de travail | ✅ | ✅ | – | – |
+| Pull request vers `main` | ✅ | ✅ | – | – |
+| Push sur `main` (fusion) | ✅ | ✅ | ✅ `sha-xxxxxxx` + `latest` | ✅ |
+| Tag `v*` (release) | ✅ | ✅ | ✅ `vX.Y.Z` | ✅ |
+| Nightly / manuel | ✅ | ✅ | – | – |
 
 **Justification des actions GitHub retenues** : uniquement des actions officielles et maintenues, épinglées sur leur dernière version majeure (vérifiée en novembre 2026).
 
@@ -122,6 +134,9 @@ Les étapes de conteneurisation (build des images, smoke test Docker Compose) et
 | `actions/setup-node` | v7 | Installation de Node.js | Action officielle ; **Node 24** (LTS, support jusqu'en avril 2028), compatible avec Angular 17 (`engines: >=20.9.0`) ; cache npm basé sur `package-lock.json` |
 | `SonarSource/sonarqube-scan-action` | v8 | Analyse du front | Action officielle SonarSource ; vérifie la signature GPG du scanner téléchargé |
 | `actions/upload-artifact` | v7 | Publication des rapports | Action officielle ; rapports consultables depuis la page du run pendant 14 jours |
+| `docker/login-action` | v4 | Connexion à GHCR | Action officielle Docker ; utilise le `GITHUB_TOKEN` éphémère et se déconnecte automatiquement en fin de job |
+| Docker Compose (CLI du runner) | v2 | Build, démarrage, publication des images | **Mêmes commandes et même fichier `docker-compose.yml` qu'en local** : pas d'action supplémentaire, aucune divergence entre poste de développement et CI |
+| Trivy (image `aquasec/trivy`) | 0.76.2 | Scan des images | Scanner open source de référence, exécuté en conteneur (aucune installation) ; version figée |
 
 **Outil de build back-end** : l'énoncé mentionne Maven, mais le projet existant utilise **Gradle** (wrapper 8.7). Le pipeline conserve Gradle pour ne pas réécrire le build : le wrapper garantit une version identique en local et en CI. Le back est analysé avec le **plugin Gradle `org.sonarqube`**, recommandé par SonarSource pour les projets Gradle (il récupère automatiquement sources, binaires et classpath).
 
@@ -132,6 +147,8 @@ Les étapes de conteneurisation (build des images, smoke test Docker Compose) et
 | Fichier | Rôle dans le pipeline |
 |---|---|
 | `.github/workflows/ci.yml` | Workflow CI : toute la logique d'automatisation est centralisée ici |
+| `Dockerfile` | Build multi-stage des images `back` et `front` (section 3.1) |
+| `docker-compose.yml` | Orchestration ; utilisé à l'identique en local, en CI (smoke test) et au déploiement (section 3.2) |
 | `.github/dependabot.yml` | Mises à jour hebdomadaires des dépendances Gradle, npm, actions GitHub et images Docker |
 | `back/build.gradle` | Ajout du plugin **JaCoCo** (rapport de couverture XML/HTML généré après les tests) et du plugin **`org.sonarqube`** (URL SonarQube Cloud, chemin du rapport JaCoCo, attente de la Quality Gate) |
 | `front/karma.conf.js` | Ajout du reporter de couverture **`lcov`**, format lu par SonarQube |
@@ -151,6 +168,25 @@ npm ci
 npx ng build
 npx ng test --watch=false --browsers=ChromeHeadlessNoSandbox --code-coverage
 ```
+
+#### Référence des commandes
+
+| Commande | Objectif | Où elle est définie | Quand elle est exécutée |
+|---|---|---|---|
+| `./gradlew build jacocoTestReport` | Compiler le back, lancer **tous les tests back** (JUnit) et produire le rapport de couverture | Tâches Gradle : `back/build.gradle` ; appel : `.github/workflows/ci.yml` (job `back`) | CI (chaque run) ; local |
+| `./gradlew sonar` | Envoyer l'analyse du back à SonarQube Cloud et attendre la Quality Gate | Plugin `org.sonarqube` : `back/build.gradle` ; appel : workflow (job `back`) | CI (si `SONAR_TOKEN` disponible) |
+| `./gradlew bootJar` | Produire le JAR exécutable du back, sans tests | `Dockerfile` (étage `back-build`) | Build d'image : CI (job `docker`) ; local (`docker compose build`) |
+| `npm ci` | Installer les dépendances front exactement selon `package-lock.json` | `front/package.json` ; appels : workflow (job `front`) et `Dockerfile` (étage `front-build`) | CI ; build d'image ; local |
+| `npx ng build` | Construire le front en mode production | `front/angular.json` ; appels : workflow (job `front`) et `Dockerfile` | CI ; build d'image ; local |
+| `npx ng test --watch=false --browsers=ChromeHeadlessNoSandbox --code-coverage` | Lancer **tous les tests front** (Karma/Jasmine) une seule fois, sans interface, avec couverture `lcov` | `front/angular.json` et `front/karma.conf.js` ; appel : workflow (job `front`) | CI (chaque run) ; local |
+| `npm audit --omit=dev --audit-level=high` | Signaler les vulnérabilités des dépendances de production du front (non bloquant) | Workflow (job `front`) | CI (chaque run) |
+| `sonarqube-scan-action` | Envoyer l'analyse du front à SonarQube Cloud et attendre la Quality Gate | Workflow (job `front`) + `front/sonar-project.properties` | CI (si `SONAR_TOKEN` disponible) |
+| `docker compose build` | Construire les images `back` et `front` | `docker-compose.yml` + `Dockerfile` ; appel : workflow (job `docker`) | CI (chaque run) ; local |
+| `docker compose up -d --wait` | Démarrer l'application et attendre que les healthchecks soient au vert | `docker-compose.yml` ; appels : workflow (jobs `docker` et `deploy`) | CI ; déploiement ; local |
+| `curl -fsS http://localhost:8080/persons` et `curl -fsSk https://localhost/` | **Smoke test** : vérifier que l'API et le front répondent | Workflow (jobs `docker` et `deploy`) | CI ; déploiement |
+| `docker run aquasec/trivy image …` | Scanner les images (vulnérabilités hautes/critiques, secrets) | Workflow (job `docker`) | CI (chaque run, non bloquant) ; local |
+| `docker compose push` | Publier les images taguées `IMAGE_TAG` sur GHCR | `docker-compose.yml` (noms d'images) ; appel : workflow (job `docker`) | CD : push sur `main` ou tag `v*` |
+| `docker compose pull` puis `docker compose up -d --no-build --wait` | Déployer les images publiées, sans reconstruction | Workflow (job `deploy`) | CD : push sur `main` ou tag `v*` ; serveur cible (manuel) |
 
 **Adapter le pipeline** : les versions de Java et de Node sont centralisées dans le bloc `env:` du workflow (`JAVA_VERSION`, `NODE_VERSION`). Les seuils de qualité se règlent dans la Quality Gate de SonarQube Cloud, sans modifier le workflow.
 
@@ -177,7 +213,8 @@ npx ng test --watch=false --browsers=ChromeHeadlessNoSandbox --code-coverage
 - Le seul secret, `SONAR_TOKEN`, est stocké dans **GitHub Secrets** et transmis aux étapes via une variable d'environnement. GitHub le **masque automatiquement** dans les logs ; il n'apparaît dans aucun fichier du dépôt.
 - Les identifiants non sensibles (organisation, clés de projet) sont des **variables GitHub** (`vars.*`) : ils peuvent changer sans modifier le code.
 - Les pull requests venant de forks ne reçoivent pas les secrets : l'étape SonarQube est alors **ignorée** (`if: env.SONAR_TOKEN != ''`), mais le build et les tests s'exécutent normalement.
-- Le workflow s'exécute avec des **permissions minimales** (`contents: read`).
+- Le workflow s'exécute avec des **permissions minimales** (`contents: read`). Seul le job `docker` reçoit `packages: write` (publication) et le job `deploy` `packages: read` (récupération).
+- La connexion à GHCR utilise le **`GITHUB_TOKEN`** éphémère généré par GitHub pour chaque run : aucun mot de passe ni jeton de registre n'est stocké.
 
 **Relancer le pipeline**
 
@@ -196,54 +233,162 @@ npx ng test --watch=false --browsers=ChromeHeadlessNoSandbox --code-coverage
 
 ## 3. Plan de conteneurisation et de déploiement
 
-### 3.1 Rôle des Dockerfiles existants
+### 3.1 Dockerfiles
 
-Le dépôt contient un **Dockerfile unique à la racine**, en *multi-stage build* : les étages de compilation (qui contiennent Node, Gradle, le JDK et les sources) sont séparés des étages d'exécution, qui ne contiennent que le strict nécessaire. Les images finales sont ainsi plus légères et exposent une surface d'attaque réduite.
+#### Analyse du Dockerfile existant
 
-| Étage | Rôle | Image de base actuelle |
-|---|---|---|
-| `front-build` | `npm ci` puis build Angular optimisé | `node` (non versionnée) |
-| `back-build` | Compilation et tests Gradle, production du JAR | `gradle:jdk17` |
-| `front` | **Image d'exécution du front** : fichiers statiques servis par Caddy (ports 80/443, fallback SPA vers `index.html`) | `alpine:3.19` + Caddy |
-| `back` | **Image d'exécution de l'API** : JAR exécuté sur un JRE 21 (port 8080) | `alpine:3.19` + OpenJDK 21 JRE |
-| `standalone` | Front et back dans un même conteneur, pilotés par supervisord | `alpine:3.19` + supervisor |
+Le dépôt contient un **Dockerfile unique à la racine**, en *multi-stage build* : les étages de compilation (Node, JDK, outils de build et sources) sont séparés des étages d'exécution, qui ne contiennent que le strict nécessaire. Ce principe est pertinent et a été conservé. En revanche, la version d'origine présentait plusieurs défauts :
 
-**Principes retenus pour adapter les Dockerfiles** (sans changer l'architecture existante) :
-
-- **Versions figées** des images de base (Node LTS compatible, Gradle/JDK, Alpine maintenue) pour des builds reproductibles.
-- **Correction des ports** : `EXPOSE 8080` pour le back.
-- **Pas de double exécution des tests** : la CI exécute les tests ; le build Docker compile seulement (`-x test`).
-- **Exécution en utilisateur non-root** dans les images d'exécution.
-- **`HEALTHCHECK`** sur chaque image pour permettre à Docker Compose de vérifier l'état réel des services.
-- **`.dockerignore`** maintenu pour exclure `node_modules`, `build`, `dist` et les caches du contexte de build.
-- Les cibles `front` et `back` sont utilisées par Docker Compose ; la cible `standalone` est conservée pour une démonstration rapide, mais elle n'est pas déployée par le pipeline (un processus par conteneur).
-
-### 3.2 Rôle de docker-compose
-
-Le fichier `docker-compose.yml` (à créer) orchestre l'application complète sur un seul hôte, avec une seule commande :
-
-| Service | Image (cible Dockerfile) | Ports | Particularités |
+| Étage d'origine | Rôle | Image de base | Problème constaté |
 |---|---|---|---|
-| `back` | `back` | `8080:8080` | Healthcheck sur l'API (`/persons`) |
-| `front` | `front` | `80:80`, `443:443` | `depends_on: back` avec `condition: service_healthy` |
+| `front-build` | `npm ci` puis build Angular | `node` (sans version) | Build non reproductible : la version de Node change à chaque nouvelle publication |
+| `back-build` | Compilation **et tests** Gradle | `gradle:jdk17` | Tests rejoués à chaque build d'image ; JDK 17 alors que l'exécution se fait en JRE 21 |
+| `front` | Fichiers statiques servis par Caddy | `alpine:3.19` + `apk add caddy` | Alpine 3.19 hors support ; exécution en `root` ; aucun healthcheck |
+| `back` | JAR exécuté sur JRE 21 | `alpine:3.19` + `apk add openjdk21-jre-headless` | Idem ; `EXPOSE 4200` alors que l'API écoute sur 8080 |
+| `standalone` | Front et back dans un seul conteneur via supervisord | `alpine:3.19` + supervisor | Fusion de deux systèmes de fichiers complets (`COPY --from=front / /`) ; plusieurs processus par conteneur |
 
-- **Pas de service de base de données** : HSQLDB est embarquée en mémoire dans le back. L'ajout d'une base persistante (PostgreSQL + volume) est identifié comme une évolution (voir plan de sauvegarde).
-- Le port 8080 doit rester publié sur l'hôte, car le front appelle `http://localhost:8080` depuis le navigateur de l'utilisateur.
-- Usages :
-  - **en local** : `docker compose up --build` pour construire et lancer l'application ;
-  - **en CI** : démarrage de la pile puis *smoke test* (l'API répond, le front est servi) pour valider que les conteneurs démarrent réellement ;
-  - **en déploiement** : `docker compose pull && docker compose up -d` à partir des images publiées.
+#### Dockerfile adapté
 
-### 3.3 Stratégie de déploiement envisagée
+| Étage | Image de base retenue | Taille de base | Justification |
+|---|---|---|---|
+| `front-build` | `node:24.22-alpine3.24` | ~63 Mo | Image officielle Docker (Node.js), version **LTS** (support jusqu'en avril 2028), variante Alpine minimale ; même version de Node qu'en CI |
+| `back-build` | `eclipse-temurin:21-jdk-alpine-3.24` | ~184 Mo | Image officielle Docker maintenue par **Eclipse Adoptium** ; JDK 21 **LTS** identique à la CI ; Gradle fourni par le wrapper du projet (version figée 8.7) |
+| `front` | `caddy:2.11-alpine` | ~25 Mo | Image officielle Docker de Caddy ; conserve le serveur web d'origine (fallback SPA, HTTPS automatique) |
+| `back` | `eclipse-temurin:21-jre-alpine-3.24` | ~74 Mo | **JRE seul** (pas de JDK, pas de Gradle), variante Alpine minimale |
 
-1. **Publication des images** sur **GitHub Container Registry (GHCR)**, authentifiée avec le `GITHUB_TOKEN` du workflow (aucun secret supplémentaire) :
-   - `ghcr.io/<owner>/microcrm-back` et `ghcr.io/<owner>/microcrm-front` ;
-   - tag `sha-<commit>` à chaque push sur `main`, plus `latest` ;
-   - tag de version `vX.Y.Z` lors de la création d'un tag Git (release).
-2. **Conditions de publication** : uniquement depuis `main` ou un tag, et seulement si les tests, la Quality Gate SonarQube et le smoke test Docker Compose sont au vert. Les pull requests construisent les images sans les publier.
-3. **Déploiement automatisé** : un job de déploiement récupère les images publiées et relance la pile via Docker Compose sur l'environnement cible, puis exécute un smoke test. Pour ce projet, la cible est un environnement local ou de démonstration ; un déploiement cloud reste optionnel.
-4. **Environnement GitHub `production`** avec approbation manuelle possible avant le déploiement d'une release.
-5. **Retour arrière** : redéployer le tag d'image précédent (`IMAGE_TAG=<version précédente> docker compose up -d`). Les images étant immuables et versionnées, le rollback ne nécessite aucune reconstruction.
+Les images `openjdk:*` ne sont pas retenues : l'image officielle `openjdk` est **dépréciée** et n'est plus mise à jour. Les images `node:18-alpine` ou `node:20-alpine` ne le sont pas non plus, car **Node 18 et 20 sont en fin de vie**. Les variantes Alpine ont été préférées aux variantes `-slim` (Debian) pour leur taille plus réduite.
+
+**Bonnes pratiques appliquées :**
+
+- **Versions figées** des images de base (`24.22-alpine3.24`, `21-jre-alpine-3.24`, `2.11-alpine`) : builds reproductibles. Les nouvelles versions sont proposées par **Dependabot** (écosystème `docker`), sous forme de pull requests passant par la CI.
+- **Images d'exécution minimales** : uniquement le JAR sur un JRE, ou les fichiers statiques sur Caddy. Aucune source, aucun outil de build, aucun gestionnaire de paquets supplémentaire n'est installé.
+- **Utilisateur non-root** (`app`, uid 100) dans les deux images d'exécution. Le binaire `caddy` de l'image officielle possède la capacité `cap_net_bind_service`, ce qui lui permet d'écouter sur les ports 80/443 sans être `root`.
+- **Aucune donnée sensible** dans les images : `.dockerignore` exclut `.git`, `.github`, la documentation, les fichiers `.env`, les artefacts locaux (`node_modules`, `build`, `dist`, `coverage`). Le scan Trivy ne détecte **aucun secret** dans les images.
+- **Ordre des couches optimisé pour le cache** : les fichiers de dépendances (`package*.json`, scripts Gradle) sont copiés et installés avant le code source. Un changement de code ne réinstalle donc pas les dépendances. Les caches npm et Gradle utilisent des *cache mounts* BuildKit, qui ne sont pas inclus dans l'image.
+- **Pas de double exécution des tests** : l'image du back est construite avec `./gradlew bootJar`, puisque les tests sont exécutés par la CI.
+- **`HEALTHCHECK`** dans chaque image : requête HTTP sur l'API (port 8080) pour le back ; API d'administration de Caddy (port 2019, accessible uniquement depuis le conteneur) pour le front.
+- **JVM adaptée au conteneur** : `-XX:MaxRAMPercentage=75` dimensionne la mémoire de la JVM en fonction des limites du conteneur.
+- **Ports corrects** : `EXPOSE 8080` pour le back, `EXPOSE 80 443` pour le front.
+- **Fins de ligne** : un fichier `.gitattributes` force les fins de ligne LF pour `gradlew`. Sans lui, un poste Windows (`core.autocrlf=true`) produisait un script en CRLF, impossible à exécuter dans le conteneur Linux (`exit code 127`).
+- **Suppression de la cible `standalone`** et de `misc/docker/supervisor.ini` : la bonne pratique est un processus par conteneur, l'orchestration étant assurée par Docker Compose.
+
+#### Scan de sécurité des images (Trivy)
+
+Twistlock (Prisma Cloud) étant un outil commercial, les images ont été scannées avec **Trivy** (Aqua Security), un scanner open source de référence qui détecte les vulnérabilités (paquets système et dépendances applicatives) et les secrets :
+
+```shell
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest \
+  image --scanners vuln,secret ghcr.io/brunohoarau/microcrm-back:latest
+```
+
+| Image | Système (Alpine 3.24) | Application | Secrets |
+|---|---|---|---|
+| `microcrm-front` | **0** vulnérabilité | Binaire Caddy : 1 haute, 2 moyennes (bibliothèque `go-jose`, aucun correctif publié à ce jour) | 0 |
+| `microcrm-back` | **0** vulnérabilité | Dépendances Java : 9 critiques, 33 hautes, 33 moyennes, 14 faibles | 0 |
+| Ancienne image front (Alpine + `apk add caddy`) | – | 7 hautes, 16 moyennes au total | 0 |
+
+**Interprétation :** les images de base retenues sont **saines** (aucune vulnérabilité système). Les vulnérabilités restantes du back proviennent **exclusivement des dépendances de l'application** figées par **Spring Boot 3.2.5** (Tomcat embarqué 10.1.20, Jackson 2.15.4, json-smart 2.5.1). Elles ne peuvent pas être corrigées par l'image Docker. Leur correction passe par la montée de version de Spring Boot, inscrite au plan de remédiation (section 5.6) et au plan de mise à jour (section 8).
+
+### 3.2 docker-compose.yml
+
+Le fichier `docker-compose.yml`, à la racine, orchestre l'application complète avec une seule commande :
+
+```shell
+docker compose up --build      # construction des images et démarrage
+docker compose down            # arrêt
+```
+
+| Service | Cible Dockerfile | Image | Ports | Particularités |
+|---|---|---|---|---|
+| `back` | `back` | `ghcr.io/brunohoarau/microcrm-back:${IMAGE_TAG:-latest}` | `8080:8080` | Healthcheck HTTP sur l'API |
+| `front` | `front` | `ghcr.io/brunohoarau/microcrm-front:${IMAGE_TAG:-latest}` | `80:80`, `443:443` | Démarre seulement quand le back est `healthy` (`depends_on` + `condition: service_healthy`) |
+
+**Choix techniques :**
+
+- **Ordre de démarrage fiable** : le front attend que l'API soit réellement opérationnelle (healthcheck), et pas seulement que son conteneur soit lancé.
+- **Nom d'image paramétrable** (`IMAGE_TAG`) : le même fichier sert au développement local (build) et au déploiement d'une version publiée sur GHCR (`IMAGE_TAG=<version> docker compose up -d`), ce qui permet aussi le retour arrière.
+- **`restart: unless-stopped`** : redémarrage automatique en cas d'arrêt inattendu.
+- **`no-new-privileges`** : un processus du conteneur ne peut pas obtenir de privilèges supplémentaires.
+- **Pas de service de base de données** : HSQLDB est embarquée en mémoire dans le back. L'ajout d'une base persistante (PostgreSQL avec volume) est une évolution identifiée dans le plan de sauvegarde.
+- **Port 8080 publié sur l'hôte** : le front appelle l'API depuis le navigateur de l'utilisateur à l'adresse `http://localhost:8080`, codée en dur dans `front/src/app/config.ts`.
+
+**Vérification du démarrage** (`docker compose up`) :
+
+| Contrôle | Résultat |
+|---|---|
+| État des conteneurs | `microcrm-back` et `microcrm-front` : **healthy** |
+| `GET http://localhost:8080/persons` | HTTP **200**, données initiales (John Doe) |
+| `GET https://localhost/` | HTTP **200**, application Angular |
+| `GET http://localhost/` | HTTP **308**, redirection vers HTTPS |
+| `GET https://localhost/persons/1` (route Angular) | HTTP **200**, fallback SPA fonctionnel |
+| Utilisateur des processus | `uid=100(app)`, non-root, dans les deux conteneurs |
+
+**Usages prévus :**
+
+- **en local** : `docker compose up --build` ;
+- **en CI** : démarrage de la pile, puis *smoke test* (l'API répond, le front est servi) ;
+- **en déploiement** : `docker compose pull && docker compose up -d` à partir des images publiées.
+
+### 3.3 Stratégie de déploiement (mise en œuvre)
+
+Le déploiement continu est assuré par les jobs `docker` et `deploy` du workflow `.github/workflows/ci.yml`. Ils réutilisent **le même `docker-compose.yml` qu'en local**.
+
+#### Livraison : publication des images (job `docker`)
+
+1. **Calcul du tag** des images (variable `IMAGE_TAG`, lue par `docker-compose.yml`) :
+   - push sur `main` : `sha-<7 premiers caractères du commit>`, par exemple `sha-dd40e27` ;
+   - tag Git `v*` : le nom du tag, par exemple `v1.0.0`.
+2. **Build** : `docker compose build`.
+3. **Smoke test** : `docker compose up -d --wait` démarre la pile et attend les healthchecks, puis deux requêtes `curl` vérifient l'API (`/persons`) et le front. En cas d'échec, les logs des conteneurs sont affichés et le job échoue. **Aucune image défaillante n'est publiée.**
+4. **Scan Trivy** des deux images (vulnérabilités hautes/critiques et secrets), résultat affiché dans les logs. Il est **non bloquant** : les vulnérabilités connues du back viennent de Spring Boot 3.2.5 et ne peuvent être corrigées que par une montée de version (section 5.6).
+5. **Publication sur GitHub Container Registry** (uniquement pour un push sur `main` ou un tag `v*`) :
+   - `ghcr.io/brunohoarau/microcrm-back:<IMAGE_TAG>` et `ghcr.io/brunohoarau/microcrm-front:<IMAGE_TAG>` ;
+   - sur `main`, le tag **`latest`** est en plus déplacé vers cette version ;
+   - le label `org.opencontainers.image.source` relie les images au dépôt GitHub (onglet *Packages*).
+
+Pour les pull requests, les branches de travail et le nightly, les étapes 1 à 4 s'exécutent, mais les images **ne sont pas publiées**.
+
+#### Déploiement (job `deploy`)
+
+Le job s'exécute après une publication réussie (push sur `main` ou tag `v*`) :
+
+1. Connexion à GHCR avec le `GITHUB_TOKEN` (lecture seule).
+2. `docker compose pull` : récupération des images **publiées** pour `IMAGE_TAG`.
+3. `docker compose up -d --no-build --wait` : démarrage **sans reconstruction**, en attendant les healthchecks.
+4. Vérification : `docker compose ps` et smoke test `curl`. Le résumé du run indique la version déployée.
+
+Le job est rattaché à l'**environnement GitHub `production`** : chaque déploiement est tracé dans l'onglet *Deployments* du dépôt. Pour exiger une **validation manuelle** avant chaque déploiement : *Settings → Environments → production → Required reviewers*.
+
+**Plateforme cible :** dans le cadre de ce projet, le déploiement s'exécute sur un runner GitHub, soit un **environnement de démonstration éphémère**. Il prouve que les images publiées dans le registre démarrent correctement sur une machine vierge, avec la seule commande de déploiement. Pour un serveur réel, il suffit de :
+
+- **soit** exécuter le job sur un **runner auto-hébergé** installé sur le serveur (`runs-on: self-hosted`), sans autre changement ;
+- **soit** exécuter manuellement, sur n'importe quel hôte disposant de Docker et du fichier `docker-compose.yml` :
+
+```shell
+docker login ghcr.io                     # si les images sont privées
+IMAGE_TAG=v1.0.0 docker compose pull
+IMAGE_TAG=v1.0.0 docker compose up -d --no-build --wait
+```
+
+#### Créer une release
+
+```shell
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+Le pipeline complet s'exécute : tests, Quality Gate, build, smoke test, publication des images `v1.0.0` et déploiement.
+
+#### Retour arrière
+
+Les images étant **immuables et versionnées**, revenir à une version précédente ne demande aucune reconstruction. Il suffit de redéployer son tag :
+
+```shell
+IMAGE_TAG=sha-dd40e27 docker compose pull
+IMAGE_TAG=sha-dd40e27 docker compose up -d --no-build --wait
+```
+
+Les versions disponibles sont listées dans l'onglet *Packages* du dépôt GitHub.
 
 ---
 
@@ -259,7 +404,7 @@ Le fichier `docker-compose.yml` (à créer) orchestre l'application complète su
 | Couverture de code | Back et front | JaCoCo (back), karma-coverage `lcov` (front) | Front seulement, non exporté |
 | Analyse statique qualité et sécurité | Tout le code | SonarQube Cloud | À mettre en place |
 | Audit des dépendances | npm et Gradle | `npm audit`, Dependabot | À mettre en place |
-| Scan des images Docker | Images `back` et `front` | Trivy | À mettre en place |
+| Scan des images Docker | Images `back` et `front` | Trivy | Scan manuel réalisé (section 3.1) |
 | Smoke test de déploiement | Pile Docker Compose | `docker compose up` + `curl` | À mettre en place |
 
 ### 4.2 Fréquence d'exécution : quels tests, à quel moment

@@ -1,13 +1,16 @@
-# Pipeline d'intégration continue de MicroCRM
-# Build + tests + couverture + analyse SonarQube Cloud, pour le back-end (Spring Boot / Gradle)
-# et le front-end (Angular / npm). Voir docs/documentation-technique.md, sections 2 et 4.
+# Pipeline CI/CD de MicroCRM
+#   CI : build + tests + couverture + analyse SonarQube Cloud (back et front)
+#   CD : build des images Docker, smoke test Docker Compose, scan Trivy,
+#        publication sur GHCR (main et tags v*) puis déploiement.
+# Voir docs/documentation-technique.md, sections 2, 3 et 4.
 
 name: CI
 
 on:
-  # Retour rapide sur toute branche
+  # Retour rapide sur toute branche ; les tags v* déclenchent une release
   push:
     branches: ["**"]
+    tags: ["v*"]
   # Contrôle avant fusion sur main
   pull_request:
     branches: [main]
@@ -21,14 +24,18 @@ on:
 permissions:
   contents: read
 
-# Une seule exécution par branche/PR : la précédente est annulée si un nouveau commit arrive
+# Une seule exécution par branche/PR : la précédente est annulée si un nouveau commit arrive,
+# sauf sur main et les tags, pour ne jamais interrompre une publication ou un déploiement.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
 
 env:
   JAVA_VERSION: "21"
   NODE_VERSION: "24"
+  TRIVY_IMAGE: aquasec/trivy:0.76.2
+  # Publication uniquement pour un push sur main ou un tag de release v*
+  PUBLISH: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
 
 jobs:
   back:
@@ -128,3 +135,115 @@ jobs:
           name: front-coverage
           path: front/coverage/microcrm/
           retention-days: 14
+
+  docker:
+    name: Images Docker (build, smoke test, scan, publication)
+    needs: [back, front] # uniquement si build, tests et Quality Gate sont au vert
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # publication sur GitHub Container Registry
+    outputs:
+      image_tag: ${{ steps.tag.outputs.image_tag }}
+    steps:
+      - name: Récupération du code
+        uses: actions/checkout@v7
+
+      - name: Calcul du tag des images
+        id: tag
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            IMAGE_TAG="$GITHUB_REF_NAME"          # release : v1.2.3
+          else
+            IMAGE_TAG="sha-${GITHUB_SHA::7}"      # commit : sha-abc1234
+          fi
+          echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "Tag des images : $IMAGE_TAG"
+
+      - name: Build des images (docker compose build)
+        run: docker compose build
+
+      - name: Démarrage de l'application (docker compose up)
+        run: docker compose up -d --wait --wait-timeout 120
+
+      - name: Smoke test (API et front répondent)
+        run: |
+          curl -fsS -o /dev/null -w "API    /persons -> %{http_code}\n" http://localhost:8080/persons
+          curl -fsSk -o /dev/null -w "Front  /        -> %{http_code}\n" https://localhost/
+
+      - name: Logs des conteneurs (en cas d'échec)
+        if: failure()
+        run: docker compose logs
+
+      - name: Arrêt de l'application
+        if: always()
+        run: docker compose down
+
+      - name: Scan de sécurité des images (Trivy, non bloquant)
+        run: |
+          for service in back front; do
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY_IMAGE" \
+              image --no-progress --scanners vuln,secret --severity HIGH,CRITICAL --exit-code 0 \
+              "ghcr.io/brunohoarau/microcrm-$service:$IMAGE_TAG"
+          done
+
+      - name: Connexion à GitHub Container Registry
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }} # jeton éphémère du workflow, aucun secret à gérer
+
+      - name: Publication des images sur GHCR
+        if: env.PUBLISH == 'true'
+        run: |
+          docker compose push
+          # Sur main, le tag "latest" désigne la dernière version validée
+          if [[ "$GITHUB_REF" == refs/heads/main ]]; then
+            for service in back front; do
+              image="ghcr.io/brunohoarau/microcrm-$service"
+              docker tag "$image:$IMAGE_TAG" "$image:latest"
+              docker push "$image:latest"
+            done
+          fi
+
+  deploy:
+    name: Déploiement (Docker Compose)
+    needs: docker
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: production
+      url: https://localhost
+    permissions:
+      contents: read
+      packages: read # récupération des images publiées
+    env:
+      IMAGE_TAG: ${{ needs.docker.outputs.image_tag }}
+    steps:
+      - name: Récupération du fichier docker-compose.yml
+        uses: actions/checkout@v7
+
+      - name: Connexion à GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Récupération des images publiées (docker compose pull)
+        run: docker compose pull
+
+      - name: Déploiement (docker compose up, sans rebuild)
+        run: docker compose up -d --no-build --wait --wait-timeout 120
+
+      - name: Vérification du déploiement
+        run: |
+          docker compose ps
+          curl -fsS -o /dev/null -w "API    /persons -> %{http_code}\n" http://localhost:8080/persons
+          curl -fsSk -o /dev/null -w "Front  /        -> %{http_code}\n" https://localhost/
+          echo "### Déploiement de la version \`$IMAGE_TAG\` réussi" >> "$GITHUB_STEP_SUMMARY"
