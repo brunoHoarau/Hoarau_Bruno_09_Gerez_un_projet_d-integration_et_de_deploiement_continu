@@ -1,6 +1,18 @@
+{
+	# Le conteneur tourne en non-root : pas d'installation du certificat racine local
+	# dans le magasin de confiance (inutile dans un conteneur, et source d'erreur au démarrage)
+	skip_install_trust
+}
+
 * {
 	root * /app/front
 	encode gzip
 	try_files {path} /index.html
 	file_server
+
+	# Logs d'accès au format JSON sur la sortie standard (centralisés par la stack ELK)
+	log {
+		output stdout
+		format json
+	}
 }

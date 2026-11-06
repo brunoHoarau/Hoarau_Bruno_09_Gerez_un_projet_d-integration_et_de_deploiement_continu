@@ -133,3 +133,16 @@ docker build --target front -t microcrm-front .
 ```
 
 Les choix techniques (images de base, sécurité, orchestration) sont détaillés dans [docs/documentation-technique.md](docs/documentation-technique.md#3-plan-de-conteneurisation-et-de-déploiement).
+
+### Centralisation des logs (ELK)
+
+Une stack Elasticsearch / Logstash / Kibana 8.19 centralise les logs du back-end et du front-end (usage local uniquement, environ 4 Go de RAM) :
+
+```shell
+docker compose -f docker-compose.yml -f docker-compose.elk.yml up -d --build
+sh elk/generate-traffic.sh 30        # trafic de démonstration (optionnel)
+```
+
+Kibana : http://localhost:5601 → *Tableaux de bord* → **MicroCRM - Logs applicatifs**.
+
+Détails : [docs/documentation-technique.md](docs/documentation-technique.md#6-monitoring-métriques--kpi).

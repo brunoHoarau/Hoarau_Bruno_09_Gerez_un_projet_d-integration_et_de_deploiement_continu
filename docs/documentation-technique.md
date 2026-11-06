@@ -523,7 +523,115 @@ SonarQube Cloud est la **porte de qualité et de sécurité** du pipeline :
 
 ## 6. Monitoring, métriques & KPI
 
-*À compléter : métriques DORA (Lead Time, Deployment Frequency, MTTR, Change Failure Rate), KPI (temps de build, temps des tests, taux d'erreurs), dashboards et alertes.*
+### 6.1 Centralisation des logs avec la stack ELK
+
+#### Objectif et principe
+
+Les logs du back-end (Spring Boot) et du front-end (serveur Caddy) sont centralisés dans **Elasticsearch** et visualisés dans un tableau de bord **Kibana** : erreurs, volume, fréquence des événements et temps de réponse.
+
+```
+ microcrm-back  ──┐  pilote de logs Docker « gelf »        ┌───────────┐     ┌───────────────┐     ┌────────┐
+ (logs JSON)      ├──────────── UDP 12201 ───────────────► │ Logstash  │ ──► │ Elasticsearch │ ◄── │ Kibana │
+ microcrm-front ──┘                                        │ (filtre)  │     │ (index/jour)  │     │ :5601  │
+ (logs JSON Caddy)                                         └───────────┘     └───────────────┘     └────────┘
+```
+
+**Choix d'architecture (simplicité) :**
+
+- **Aucun agent supplémentaire** (pas de Filebeat) : Docker envoie lui-même la sortie standard des conteneurs à Logstash grâce à son **pilote de logs `gelf`**, géré nativement par Logstash (`input { gelf {} }`). Les logs restent aussi consultables avec `docker logs`.
+- **Logs structurés en JSON à la source** : Logstash n'a pas besoin de règles d'analyse complexes (`grok`), un simple filtre `json` suffit.
+- **Fichier Compose dédié** (`docker-compose.elk.yml`), **superposé** à celui de l'application : l'application et la CI restent inchangées. ELK n'est lancé qu'à la demande, en local.
+- **ELK n'est pas intégré au pipeline CI/CD** : trop lourd (environ 4 Go de RAM) et sans intérêt pour des runners éphémères.
+- **Version 8.19.23** des trois composants (dernière version stable de la branche 8.x, images officielles Docker), identique pour les trois composants comme l'exige Elastic.
+
+#### Structuration des logs
+
+| Source | Format | Mise en œuvre |
+|---|---|---|
+| **Back-end** | Une ligne JSON par événement (`@timestamp`, `level`, `logger_name`, `thread_name`, `message`, `stack_trace`…) | Bibliothèque **logstash-logback-encoder 7.4** (dernière version compatible avec le logback 1.4 de Spring Boot 3.2). Fichier `back/src/main/resources/logback-spring.xml` : JSON avec le profil Spring **`json-logs`**, format texte habituel sinon (développement, CI) |
+| **Back-end : requêtes HTTP** | Champs `http_method`, `url_path`, `http_status`, `duration_ms` | Filtre `RequestLoggingFilter` (nouveau) : une ligne par requête de l'API, niveau **ERROR** pour un statut 5xx, **WARN** pour un 4xx, **INFO** sinon. Les requêtes du healthcheck Docker (en-tête `X-Healthcheck`) sont ignorées pour ne pas polluer les logs. Couvert par le test `RequestLoggingFilterTest` |
+| **Front-end** | Logs d'accès JSON de Caddy (méthode, URI, statut, durée, taille) et logs du serveur | Directive `log { output stdout; format json }` dans `misc/docker/Caddyfile` |
+
+**Limite :** les erreurs JavaScript survenant dans le navigateur de l'utilisateur ne sont pas collectées. Ce sont les logs du serveur qui délivre le front qui sont centralisés. La collecte côté navigateur (par exemple avec Elastic APM RUM) est une évolution possible.
+
+#### Pipeline Logstash minimal (`elk/logstash/pipeline/logstash.conf`)
+
+| Étape | Rôle |
+|---|---|
+| `input { gelf { port => 12201 } }` | Réception des logs des conteneurs |
+| `mutate rename tag → service` | Service d'origine (`back` ou `front`), fourni par l'option `tag` du pilote GELF |
+| `json { source => "message" }` | Lecture de la ligne JSON : chaque champ devient un champ indexé |
+| Bloc `front` | Champs Caddy ramenés au format du back (`http_method`, `url_path`, `http_status`, `duration_ms` en millisecondes) |
+| Niveau | Niveau déduit du statut HTTP (5xx → ERROR, 4xx → WARN) ; niveau syslog numérique des lignes non JSON converti (stderr → ERROR) |
+| `output { elasticsearch }` | Un index par jour, `microcrm-logs-AAAA.MM.JJ`, avec un **modèle d'index** (`elk/logstash/templates/microcrm-logs.json`) qui type les champs (`http_status` entier, `duration_ms` décimal, `level` et `service` mots-clés) |
+
+#### Allocation mémoire
+
+| Conteneur | Paramétrage | Limite | Consommation mesurée |
+|---|---|---|---|
+| Elasticsearch | `ES_JAVA_OPTS=-Xms1g -Xmx1g`, nœud unique | `mem_limit: 2g` | ~1,7 Go |
+| Logstash | `LS_JAVA_OPTS=-Xms256m -Xmx256m` | `mem_limit: 1g` | ~620 Mo |
+| Kibana | – | `mem_limit: 1g` | ~590 Mo |
+| **Total ELK** | | **4 Go** | **~2,9 Go** |
+
+Les limites garantissent que la stack ne dépasse jamais 4 Go, même en cas de charge. Le tas Java d'Elasticsearch est fixé (Xms = Xmx) à la moitié de la limite du conteneur, comme le recommande Elastic.
+
+#### Sécurité (contexte local)
+
+- La sécurité Elastic (authentification, TLS) est **désactivée** (`xpack.security.enabled=false`) : cette configuration est réservée au **poste de développement**.
+- Les ports d'Elasticsearch (9200), de Kibana (5601) et de l'entrée GELF (12201/udp) sont publiés **uniquement sur `127.0.0.1`**, donc inaccessibles depuis le réseau.
+- Télémétrie Kibana désactivée (`TELEMETRY_OPTIN=false`).
+- Les logs ne contiennent ni secret ni donnée d'authentification. Caddy masque par défaut les en-têtes sensibles (`Cookie`, `Authorization`), et Logstash supprime de toute façon les en-têtes HTTP.
+- Pour un environnement partagé, il faudrait activer la sécurité Elastic (mots de passe des comptes `elastic`/`kibana_system`, TLS) et fournir ces mots de passe via un fichier `.env` non versionné.
+
+#### Lancer la stack
+
+```shell
+# Application + ELK (premier démarrage : 2 à 3 minutes)
+docker compose -f docker-compose.yml -f docker-compose.elk.yml up -d --build
+
+# Générer du trafic de démonstration (requêtes normales, 404 et 500)
+sh elk/generate-traffic.sh 30
+
+# Arrêt (ajouter -v pour supprimer aussi les données Elasticsearch)
+docker compose -f docker-compose.yml -f docker-compose.elk.yml down
+```
+
+- **Kibana** : http://localhost:5601, menu *Analytics → Tableaux de bord → **MicroCRM - Logs applicatifs***.
+- **Exploration libre** : *Analytics → Discover*, vue de données **MicroCRM - logs**.
+
+Ordre de démarrage garanti par les healthchecks : Elasticsearch → Logstash et Kibana → back (qui attend Logstash pour qu'aucun log de démarrage ne soit perdu) → front. Le conteneur `kibana-setup` importe ensuite automatiquement la vue de données, les visualisations et le tableau de bord (`elk/kibana/saved-objects.ndjson`), puis s'arrête.
+
+#### Tableau de bord Kibana « MicroCRM - Logs applicatifs »
+
+![Tableau de bord Kibana](images/kibana-dashboard.png)
+
+| Visualisation | Ce qu'elle montre | Indicateur |
+|---|---|---|
+| Nombre total de logs | Volume de logs sur la période | Volume |
+| Nombre d'erreurs (ERROR) | Nombre de logs de niveau ERROR | Erreurs |
+| Répartition par niveau de log | Proportion INFO / WARN / ERROR | Erreurs |
+| Volume de logs par service | Nombre d'événements dans le temps, back et front | Fréquence, tendances |
+| Erreurs et avertissements dans le temps | WARN et ERROR dans le temps | Erreurs, tendances |
+| Temps de réponse de l'API (ms) | Durée moyenne et maximale des requêtes du back | Performance |
+| Requêtes HTTP par chemin | Chemins les plus sollicités, par service, avec leur durée moyenne | Trafic, performance |
+| Derniers avertissements et erreurs | Liste détaillée (service, niveau, message) | Diagnostic |
+
+Le tableau de bord affiche par défaut la dernière heure et se rafraîchit toutes les 30 secondes.
+
+**Premières observations :**
+
+- `GET /persons/abc` provoque une **erreur 500** (identifiant non numérique) au lieu d'une erreur 400 : c'est une anomalie de gestion des erreurs de l'API, mise en évidence par le tableau de bord.
+- Le premier appel de l'API après le démarrage est nettement plus lent (pic de plusieurs centaines de millisecondes) : c'est le temps de préchauffage de la JVM. Les temps de réponse se stabilisent ensuite autour de 20 à 40 ms.
+- Les logs de Caddy ont révélé une **erreur au démarrage** (« failed to install root certificate ») : en tant qu'utilisateur non-root, Caddy tentait d'installer son certificat local dans le magasin de confiance du système. L'erreur a été corrigée en ajoutant l'option `skip_install_trust` au Caddyfile.
+
+### 6.2 Métriques DORA
+
+*À compléter.*
+
+### 6.3 KPI personnalisés et synthèse
+
+*À compléter.*
 
 ---
 

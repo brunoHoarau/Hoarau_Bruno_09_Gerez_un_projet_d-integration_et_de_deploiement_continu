@@ -74,12 +74,10 @@ COPY --from=back-build --chown=app:app /src/app.jar /app/app.jar
 
 USER app
 
-# La JVM adapte sa mémoire aux limites du conteneur
-ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75"
-
 EXPOSE 8080
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=40s --retries=5 \
-    CMD wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1
+    CMD wget -q -O /dev/null --header "X-Healthcheck: true" http://127.0.0.1:8080/ || exit 1
 
-ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+# -XX:MaxRAMPercentage : la JVM adapte sa mémoire aux limites du conteneur
+ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75", "-jar", "/app/app.jar"]

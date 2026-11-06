@@ -1,0 +1,114 @@
+# Stack ELK de centralisation des logs (usage local, hors pipeline CI/CD).
+# S'utilise EN COMPLÉMENT du docker-compose.yml de l'application :
+#
+#   docker compose -f docker-compose.yml -f docker-compose.elk.yml up -d --build
+#
+# Kibana : http://localhost:5601  →  tableau de bord « MicroCRM - Logs applicatifs »
+# Voir docs/documentation-technique.md, section 6.
+#
+# Sécurité Elastic désactivée : configuration de développement local uniquement,
+# ports d'administration publiés sur 127.0.0.1 seulement.
+
+services:
+  # --- Application : logs envoyés à Logstash (pilote GELF de Docker) --------------
+  back:
+    environment:
+      SPRING_PROFILES_ACTIVE: json-logs # logs JSON (back/src/main/resources/logback-spring.xml)
+      SPRING_MAIN_BANNER_MODE: "off"
+    logging:
+      driver: gelf
+      options:
+        gelf-address: "udp://127.0.0.1:12201"
+        tag: back
+    depends_on:
+      logstash:
+        condition: service_healthy
+
+  front:
+    logging:
+      driver: gelf
+      options:
+        gelf-address: "udp://127.0.0.1:12201"
+        tag: front
+
+  # --- Stockage et indexation -----------------------------------------------------
+  elasticsearch:
+    image: elasticsearch:8.19.23
+    container_name: microcrm-elasticsearch
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+    mem_limit: 2g
+    ports:
+      - "127.0.0.1:9200:9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      start_period: 60s
+      retries: 12
+
+  # --- Collecte et transformation -------------------------------------------------
+  logstash:
+    image: logstash:8.19.23
+    container_name: microcrm-logstash
+    environment:
+      LS_JAVA_OPTS: "-Xms256m -Xmx256m"
+      XPACK_MONITORING_ENABLED: "false"
+      PIPELINE_ECS_COMPATIBILITY: disabled
+    mem_limit: 1g
+    volumes:
+      - ./elk/logstash/pipeline:/usr/share/logstash/pipeline:ro
+      - ./elk/logstash/templates:/usr/share/logstash/templates:ro
+    ports:
+      - "127.0.0.1:12201:12201/udp" # entrée GELF (pilote de logs Docker)
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9600/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 12
+
+  # --- Visualisation --------------------------------------------------------------
+  kibana:
+    image: kibana:8.19.23
+    container_name: microcrm-kibana
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      I18N_LOCALE: fr-FR
+      TELEMETRY_OPTIN: "false"                         # pas d'envoi de statistiques d'usage
+      XPACK_SECURITY_SHOWINSECURECLUSTERWARNING: "false" # sécurité volontairement désactivée en local
+    mem_limit: 1g
+    ports:
+      - "127.0.0.1:5601:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:5601/api/status | grep -q '\"level\":\"available\"' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 90s
+      retries: 18
+
+  # Import automatique de la vue de données, des visualisations et du tableau de bord
+  kibana-setup:
+    image: kibana:8.19.23
+    container_name: microcrm-kibana-setup
+    entrypoint: ["curl", "-fsS", "-X", "POST", "http://kibana:5601/api/saved_objects/_import?overwrite=true",
+                 "-H", "kbn-xsrf: true", "--form", "file=@/setup/saved-objects.ndjson"]
+    volumes:
+      - ./elk/kibana/saved-objects.ndjson:/setup/saved-objects.ndjson:ro
+    depends_on:
+      kibana:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  es-data:

@@ -1,0 +1,28 @@
+{
+  "index_patterns": ["microcrm-logs-*"],
+  "priority": 200,
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0
+    },
+    "mappings": {
+      "properties": {
+        "@timestamp":     { "type": "date" },
+        "service":        { "type": "keyword" },
+        "level":          { "type": "keyword" },
+        "message":        { "type": "text" },
+        "logger_name":    { "type": "keyword" },
+        "thread_name":    { "type": "keyword" },
+        "stack_trace":    { "type": "text" },
+        "http_method":    { "type": "keyword" },
+        "url_path":       { "type": "keyword" },
+        "http_status":    { "type": "integer" },
+        "duration_ms":    { "type": "float" },
+        "container_name": { "type": "keyword" },
+        "image_name":     { "type": "keyword" },
+        "host":           { "type": "keyword" }
+      }
+    }
+  }
+}
