@@ -1,0 +1,4 @@
+# Scripts exécutés dans des conteneurs/runners Linux : toujours en fins de ligne LF,
+# même sur un poste Windows (core.autocrlf=true).
+gradlew text eol=lf
+*.sh text eol=lf

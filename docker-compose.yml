@@ -1,0 +1,45 @@
+# Orchestration locale de MicroCRM : docker compose up
+# Voir docs/documentation-technique.md, section 3.2.
+name: microcrm
+
+services:
+  back:
+    build:
+      context: .
+      target: back
+      labels:
+        # Relie l'image publiée sur GHCR au dépôt GitHub
+        org.opencontainers.image.source: https://github.com/brunoHoarau/Hoarau_Bruno_09_Gerez_un_projet_d-integration_et_de_deploiement_continu
+    image: ghcr.io/brunohoarau/microcrm-back:${IMAGE_TAG:-latest}
+    container_name: microcrm-back
+    ports:
+      # Publié sur l'hôte : le front appelle l'API depuis le navigateur sur http://localhost:8080
+      - "8080:8080"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 3s
+      start_period: 40s
+      retries: 5
+
+  front:
+    build:
+      context: .
+      target: front
+      labels:
+        # Relie l'image publiée sur GHCR au dépôt GitHub
+        org.opencontainers.image.source: https://github.com/brunoHoarau/Hoarau_Bruno_09_Gerez_un_projet_d-integration_et_de_deploiement_continu
+    image: ghcr.io/brunohoarau/microcrm-front:${IMAGE_TAG:-latest}
+    container_name: microcrm-front
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      back:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true

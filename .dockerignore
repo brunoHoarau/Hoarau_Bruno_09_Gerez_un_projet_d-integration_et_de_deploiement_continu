@@ -1,5 +1,20 @@
+# Le contexte de build ne contient que le code nécessaire : pas d'historique Git,
+# pas d'artefacts locaux, pas de documentation ni de fichier potentiellement sensible.
+.git
+.github
+.gitignore
+docs
+*.md
+*.odt
+**/.env
+**/*.env
+
 /back/.gradle
 /back/build
+/back/bin
+
 /front/dist
 /front/node_modules
 /front/.angular
+/front/coverage
+/front/.vscode

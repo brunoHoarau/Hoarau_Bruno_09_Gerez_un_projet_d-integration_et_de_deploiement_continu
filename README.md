@@ -106,50 +106,30 @@ cd back
 ./gradlew test
 ```
 
-### Images Docker
+### Conteneurs Docker
 
-#### Client
-
-##### Construire l'image
+L'application se lance avec [Docker Compose](https://docs.docker.com/compose/) (Docker Desktop ou Docker Engine ≥ 24) :
 
 ```shell
-docker build --target front -t orion-microcrm-front:latest .
+docker compose up --build
 ```
 
-##### Exécuter l'image
+- Front-end : https://localhost (certificat auto-signé généré par Caddy ; http://localhost redirige vers HTTPS)
+- API : http://localhost:8080
+
+Arrêter l'application :
 
 ```shell
-docker run -it --rm -p 80:80 -p 443:443 orion-microcrm-front:latest
+docker compose down
 ```
 
-L'application sera disponible sur https://localhost.
+Les deux services démarrent dans l'ordre : le front n'est lancé qu'une fois l'API déclarée « healthy ».
 
-#### Serveur
-
-##### Construire l'image
+Les images peuvent aussi être construites séparément à partir du `Dockerfile` multi-stage :
 
 ```shell
-docker build --target back -t orion-microcrm-back:latest .
+docker build --target back  -t microcrm-back  .
+docker build --target front -t microcrm-front .
 ```
 
-##### Exécuter l'image
-
-```shell
-docker run -it --rm -p 8080:8080 orion-microcrm-back:latest
-```
-
-L'API sera disponible sur http://localhost:8080.
-
-#### Tout en un
-
-```shell
-docker build --target standalone -t orion-microcrm-standalone:latest .
-```
-
-##### Exécuter l'image
-
-```shell
-docker run -it --rm -p 8080:8080 -p 80:80 -p 443:443 orion-microcrm-standalone:latest
-```
-
-L'application sera disponible sur https://localhost et l'API sur http://localhost:8080.
+Les choix techniques (images de base, sécurité, orchestration) sont détaillés dans [docs/documentation-technique.md](docs/documentation-technique.md#3-plan-de-conteneurisation-et-de-déploiement).
