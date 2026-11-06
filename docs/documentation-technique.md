@@ -390,6 +390,48 @@ IMAGE_TAG=sha-dd40e27 docker compose up -d --no-build --wait
 
 Les versions disponibles sont listées dans l'onglet *Packages* du dépôt GitHub.
 
+### 3.4 Plan de déploiement
+
+Ce plan résume, pour un développeur ou un opérateur, **comment**, **dans quel ordre** et **avec quels prérequis** MicroCRM est déployé. Le détail technique du pipeline figure en sections 2 et 3.3.
+
+#### Prérequis techniques
+
+| Élément | Prérequis | Justification |
+|---|---|---|
+| **Hôte cible** | Docker Engine ≥ 24 avec Docker Compose v2 ; ports **80**, **443** et **8080** libres ; accès sortant à `ghcr.io` | Seuls Docker et le fichier `docker-compose.yml` sont nécessaires : aucune installation de Java ni de Node sur l'hôte |
+| **Ressources** | ≈ **0,5 Go de RAM** pour l'application (mesuré : back ~300 Mo, front ~15 Mo) ; **+ 4 Go** si la stack ELK est lancée | Mesures `docker stats` (section 6.1) |
+| **Dépôt GitHub** | Secret `SONAR_TOKEN`, variables `SONAR_ORGANIZATION`, `SONAR_PROJECT_KEY_BACK`, `SONAR_PROJECT_KEY_FRONT` (section 2.3) ; environnement `production` | Le déploiement n'a lieu qu'après la Quality Gate SonarQube |
+| **Images privées** (le cas échéant) | `docker login ghcr.io` sur l'hôte avec un jeton personnel de lecture des paquets (`read:packages`), jamais écrit dans le dépôt | Les images publiées sont actuellement publiques |
+| **Poste de développement** | Java 21, Node.js 24, Docker Desktop | Mêmes versions que la CI et les images (section 1.4) |
+
+#### Modes de déploiement
+
+| Mode | Déclencheur | Version déployée | Commande / action |
+|---|---|---|---|
+| **Automatique** (standard) | Fusion d'une pull request sur `main` | `sha-<commit>` (et `latest`) | Aucune : le job `deploy` du pipeline s'en charge |
+| **Release** | Tag Git `vX.Y.Z` | `vX.Y.Z` | `git tag v1.0.0 && git push origin v1.0.0` |
+| **Manuel** sur un serveur | Opérateur | Tag choisi | `IMAGE_TAG=v1.0.0 docker compose pull` puis `IMAGE_TAG=v1.0.0 docker compose up -d --no-build --wait` |
+| **Local** (développement) | Développeur | Code local | `docker compose up --build` |
+
+#### Ordre de déploiement
+
+1. **Validation** (pipeline) : build et tests du back et du front en parallèle, puis analyse SonarQube et Quality Gate.
+2. **Livraison** : build des images, démarrage et smoke test, scan Trivy, puis publication sur GHCR.
+3. **Déploiement** : récupération des images publiées, puis démarrage sans reconstruction.
+4. **Ordre de démarrage des conteneurs**, imposé par les healthchecks :
+   - **back** (API), qui doit être `healthy` ;
+   - puis **front** (Caddy).
+   - Avec ELK : Elasticsearch → Logstash et Kibana → back → front → import du tableau de bord.
+5. **Vérification** : `docker compose ps` (conteneurs `healthy`), puis appel de `http://<hôte>:8080/persons` et `https://<hôte>/`. Le pipeline effectue cette vérification automatiquement.
+
+#### Justification des choix
+
+- **Un déploiement par fusion sur `main`** : le pipeline complet dure **3 min 43 s** et le délai nominal de mise en production est inférieur à 4 minutes (section 6.2). Déployer chaque changement est donc peu coûteux et limite la taille, et donc le risque, de chaque livraison.
+- **Déploiement uniquement après les contrôles** : 2 commits sur 3 ont été arrêtés par le pipeline avant la production, et le taux d'échec des déploiements est de **0 %**. La chaîne de validation est le principal garde-fou de la stabilité.
+- **Images immuables et versionnées, aucun build sur l'hôte** : la version déployée est exactement celle qui a été testée (smoke test) et scannée.
+- **Smoke test après démarrage** : le premier appel de l'API après un redémarrage est lent (pic de 551 ms, préchauffage de la JVM, section 6.3). Le smoke test du déploiement joue aussi le rôle d'appel de préchauffage, avant l'arrivée des premiers utilisateurs.
+- **Contrainte connue** : la base HSQLDB est en mémoire, donc **chaque déploiement réinitialise les données** (section 7).
+
 ---
 
 ## 4. Plan de testing périodique
@@ -833,13 +875,138 @@ Mesures sur l'index `microcrm-logs-*` (06/11, 11:32 → 11:51 UTC, 603 logs), av
 
 ## 7. Plan de sauvegarde des données
 
-*À compléter : éléments à sauvegarder (données, configuration, artefacts de build), procédure de sauvegarde, procédure de restauration.*
+### 7.1 Ce qui doit être sauvegardé
+
+**Contrainte principale :** l'application utilise une base **HSQLDB en mémoire**. Les données saisies sont **perdues à chaque redémarrage ou déploiement**, puis la base est réinitialisée par le jeu de données initial (`InitialDataFixture`). Il n'existe donc aujourd'hui **aucune donnée métier persistante à sauvegarder**. C'est le premier risque à traiter (section 7.4).
+
+| Élément | Où il se trouve | Criticité | Sauvegarde nécessaire ? |
+|---|---|---|---|
+| **Code source, configuration et documentation** : `back/`, `front/`, `Dockerfile`, `docker-compose*.yml`, `.github/` (workflows, Dependabot), `elk/` (pipeline Logstash, tableau de bord Kibana), `docs/` | Dépôt GitHub | **Critique** : tout le reste peut être reconstruit à partir du dépôt | Oui : copie miroir du dépôt |
+| **Images Docker publiées** (artefacts de build) | GitHub Container Registry (`microcrm-back`, `microcrm-front`) | Haute : version exacte en production | Oui pour les **releases** `vX.Y.Z` ; les images `sha-*` sont reconstructibles depuis Git |
+| **Paramétrage hors dépôt** : noms des secrets et variables GitHub, environnement `production`, projets et Quality Gate SonarQube | GitHub, SonarQube Cloud | Moyenne | Documenté (section 2.3) : **les noms et le rôle sont sauvegardés, jamais les valeurs**. Un jeton perdu se régénère dans SonarQube Cloud |
+| **Logs centralisés** (index `microcrm-logs-*`) | Volume Docker `microcrm_es-data` | Faible : données d'observation, utiles à l'analyse des KPI | Optionnelle (snapshot hebdomadaire) |
+| **Rapports CI** (tests, couverture) et historique qualité | Artefacts GitHub Actions (14 jours), SonarQube Cloud | Faible | Non : régénérés à chaque run, historique conservé par SonarQube Cloud |
+| **Données métier** | Mémoire du conteneur back | – | **Impossible en l'état** (voir 7.4) |
+
+### 7.2 Procédure de sauvegarde
+
+| Élément | Fréquence | Méthode | Format |
+|---|---|---|---|
+| Dépôt Git (code, configuration, documentation, tableau de bord Kibana) | **À chaque push** (GitHub) + **copie miroir hebdomadaire** hors de GitHub | `git clone --mirror` puis `git remote update` dans la copie miroir | Dépôt Git nu |
+| Images des releases | **À chaque release** | `docker pull` puis `docker save` des deux images `vX.Y.Z` | Archive `.tar` |
+| Tableau de bord Kibana | **Après chaque modification** dans Kibana | Export (*Stack Management → Saved Objects → Export*) vers `elk/kibana/saved-objects.ndjson`, puis commit | NDJSON versionné |
+| Logs Elasticsearch (optionnel) | Hebdomadaire | Archive du volume Docker, stack ELK arrêtée | Archive `.tar.gz` |
+
+Commandes (à exécuter depuis un répertoire de sauvegarde, par exemple `backups/`, hors du dépôt) :
+
+```shell
+# 1. Copie miroir du dépôt (première fois), puis mise à jour hebdomadaire
+git clone --mirror https://github.com/brunoHoarau/Hoarau_Bruno_09_Gerez_un_projet_d-integration_et_de_deploiement_continu.git microcrm.git
+git -C microcrm.git remote update
+
+# 2. Archive des images d'une release
+docker pull ghcr.io/brunohoarau/microcrm-back:v1.0.0
+docker pull ghcr.io/brunohoarau/microcrm-front:v1.0.0
+docker save -o microcrm-v1.0.0.tar ghcr.io/brunohoarau/microcrm-back:v1.0.0 ghcr.io/brunohoarau/microcrm-front:v1.0.0
+
+# 3. (Optionnel) Archive des logs Elasticsearch, stack arrêtée
+docker compose -f docker-compose.yml -f docker-compose.elk.yml stop elasticsearch
+docker run --rm -v microcrm_es-data:/data:ro -v "$PWD":/backup alpine tar czf /backup/es-data-$(date +%F).tar.gz -C /data .
+docker compose -f docker-compose.yml -f docker-compose.elk.yml start elasticsearch
+```
+
+Aucune de ces sauvegardes ne contient de secret : les valeurs des secrets restent dans GitHub et SonarQube Cloud.
+
+### 7.3 Procédure de restauration
+
+| Scénario d'incident | Étapes pour revenir à une version stable |
+|---|---|
+| **Dépôt GitHub perdu ou corrompu** | Recréer un dépôt, puis `git -C microcrm.git push --mirror <nouvelle URL>`. Ressaisir le secret et les variables (section 2.3) et relancer le pipeline, qui reconstruit et republie les images |
+| **Image indisponible dans le registre** | `docker load -i microcrm-v1.0.0.tar`, puis `IMAGE_TAG=v1.0.0 docker compose up -d --no-build --wait` |
+| **Version déployée défaillante** | Redéployer le tag précédent : `IMAGE_TAG=<version précédente> docker compose up -d --no-build --wait` (section 3.3) |
+| **Tableau de bord Kibana perdu** | Relancer la stack ELK : le conteneur `kibana-setup` réimporte automatiquement `elk/kibana/saved-objects.ndjson` |
+| **Logs Elasticsearch perdus** | Restaurer l'archive dans le volume (`tar xzf` dans `microcrm_es-data`), stack arrêtée |
+
+**Délai de restauration :** grâce au pipeline, une reconstruction complète depuis le dépôt prend **moins de 4 minutes** (durée du pipeline). Le temps de rétablissement mesuré lors des incidents du pipeline est de 24 minutes en moyenne (section 6.2), essentiellement du temps de diagnostic.
+
+**Limitations :**
+- Aucune donnée métier n'est restaurable tant que la base est en mémoire.
+- Les archives d'images et de logs doivent être conservées sur un support distinct de l'hôte.
+
+### 7.4 Évolution nécessaire : persistance des données
+
+Pour qu'une sauvegarde des données soit possible, la première évolution à mener est de remplacer la base en mémoire par une **base persistante** :
+- **PostgreSQL** dans un conteneur dédié, avec un **volume Docker** ;
+- ajouté au `docker-compose.yml` ;
+- configuration de Spring par variables d'environnement, avec mot de passe dans un fichier `.env` non versionné.
+
+Plan de sauvegarde associé :
+- **dump quotidien** (`pg_dump`) **conservé 7 jours** ;
+- **dump avant chaque déploiement** d'une release ;
+- **restauration testée une fois par mois**.
 
 ---
 
 ## 8. Plan de mise à jour
 
-*À compléter : mise à jour des dépendances npm/Gradle, d'Angular et de Spring Boot, des images Docker et des actions GitHub ; fréquence et bonnes pratiques.*
+### 8.1 Mise à jour de l'application
+
+Toute modification suit **le même chemin**, contrôlé par le pipeline. Aucune mise à jour n'est faite directement sur un serveur :
+
+1. Création d'une **branche**, puis développement et tests en local.
+2. **Pull request** vers `main` : build, tests, SonarQube (Quality Gate) et smoke test Docker sont exécutés automatiquement.
+3. **Fusion** sur `main` (branche protégée) : publication des images et **déploiement automatique** (section 3.4).
+4. Pour une version identifiée : **tag `vX.Y.Z`** selon le versionnement sémantique.
+   - `X` : changement incompatible ;
+   - `Y` : nouvelle fonctionnalité ;
+   - `Z` : correctif.
+
+### 8.2 Gestion des dépendances, bibliothèques et packages
+
+| Type de dépendance | Où la version est fixée | Outil de mise à jour | Règle |
+|---|---|---|---|
+| Bibliothèques Java (Spring Boot, plugins Gradle) | `back/build.gradle` | Dependabot (`gradle`), hebdomadaire | Correctifs et versions mineures : fusion si le pipeline est vert. Versions majeures : migration planifiée (8.4) |
+| Gradle | `back/gradle/wrapper/gradle-wrapper.properties` | Dependabot | Mise à jour avec `./gradlew wrapper --gradle-version <version>` |
+| Packages npm (Angular, RxJS, Karma…) | `front/package.json` + `package-lock.json` | Dependabot (`npm`), hebdomadaire ; `npm audit` à chaque run | Installation toujours avec `npm ci`. Versions majeures d'Angular avec `ng update`, une version majeure à la fois |
+| Images Docker de base (Node, Temurin, Caddy) | `Dockerfile` (tags figés) | Dependabot (`docker`), hebdomadaire ; Trivy à chaque run | Rester sur une version **LTS** (Node 24, Java 21) et une Alpine maintenue |
+| Stack ELK | `docker-compose.elk.yml` (`8.19.23`) | Manuelle, trimestrielle | Les trois composants **toujours à la même version** |
+| Actions GitHub et outils du pipeline | `.github/workflows/ci.yml` (versions majeures, `JAVA_VERSION`, `NODE_VERSION`, `TRIVY_IMAGE`) | Dependabot (`github-actions`) | Versions centralisées dans le bloc `env` du workflow |
+
+**Correctifs de sécurité :** une vulnérabilité **critique** signalée par Trivy, `npm audit`, Dependabot ou SonarQube est traitée **sans attendre le cycle hebdomadaire** : pull request dédiée, pipeline, puis déploiement.
+
+### 8.3 Fréquence et bonnes pratiques
+
+| Fréquence | Action |
+|---|---|
+| **En continu** | Chaque pull request (y compris Dependabot) passe par le pipeline complet ; aucune fusion sans pipeline vert |
+| **Chaque semaine** | Revue des pull requests Dependabot : fusion des mises à jour mineures vertes, ajout au plan de migration des majeures en échec |
+| **Chaque nuit** | Exécution planifiée du pipeline (`schedule`) : tests, `npm audit`, Trivy et SonarQube détectent les nouvelles vulnérabilités sans modification du code |
+| **Chaque mois** | Vérification des dates de fin de support (endoflife.date) d'Angular, Spring Boot, Node.js, Java, Gradle et ELK |
+| **Chaque trimestre** | Une étape de migration majeure (8.4) et la mise à jour de la stack ELK |
+
+**Bonnes pratiques :**
+
+- **Petites mises à jour fréquentes** plutôt qu'une grosse migration tardive : chaque pull request ne change qu'une dépendance, et le pipeline indique immédiatement si elle casse quelque chose.
+- **Fichiers de verrouillage versionnés** (`package-lock.json`, wrapper Gradle) et **versions figées** des images : un build est toujours reproductible.
+- **Une version majeure à la fois**, en suivant le guide de migration officiel (*Spring Boot Migration Guide*, `ng update`).
+- **Tests avant montée de version** : la couverture faible du front (27 %) rend les migrations risquées. Augmenter les tests (section 5.7) est un **prérequis** de la migration d'Angular.
+- **Regrouper les mises à jour mineures** dans Dependabot (option `groups`) pour réduire le nombre de pull requests, et **fermer les pull requests de versions majeures** remplacées par le plan de migration.
+
+### 8.4 Mises à jour prioritaires (justification par les KPI)
+
+Les mesures des sections 5 et 6 montrent une **dette de mise à jour** :
+- Spring Boot 3.2 et Angular 17 ne sont plus maintenus ;
+- **75 failles** connues (CVE) dans l'image back (Trivy) et 8 vulnérabilités npm en production ;
+- **50 % des pull requests Dependabot échouent** : ce sont précisément les versions majeures (Spring Boot 4, Gradle 9, Angular 22).
+
+Ordre de migration recommandé, une étape par pull request :
+
+| Ordre | Migration | Motif |
+|---|---|---|
+| 1 | Spring Boot **3.2 → 3.5** (Gradle 8.7 → 8.14) | Met à jour Tomcat et Jackson sans changement majeur de code. Les CVE corrigées sont à vérifier par le scan Trivy du pipeline, car la branche 3.5 n'est plus maintenue depuis juin 2026 |
+| 2 | Angular **17 → 18 → 19 → 20**, avec `ng update`, après l'ajout de tests sur les services | Retour sur une version maintenue ; corrige les vulnérabilités npm |
+| 3 | Spring Boot **3.5 → 4.x** (Gradle 9, Jakarta EE 11) | Retour au support open source ; débloque les pull requests Dependabot en échec |
+| 4 | Angular **20 → 22**, Java 21 → 25 (LTS), ELK 8 → 9 | Alignement sur les dernières versions supportées |
 
 ---
 
