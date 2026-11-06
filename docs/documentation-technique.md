@@ -287,7 +287,7 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:lates
 | `microcrm-back` | **0** vulnérabilité | Dépendances Java : 9 critiques, 33 hautes, 33 moyennes, 14 faibles | 0 |
 | Ancienne image front (Alpine + `apk add caddy`) | – | 7 hautes, 16 moyennes au total | 0 |
 
-**Interprétation :** les images de base retenues sont **saines** (aucune vulnérabilité système). Les vulnérabilités restantes du back proviennent **exclusivement des dépendances de l'application** figées par **Spring Boot 3.2.5** (Tomcat embarqué 10.1.20, Jackson 2.15.4, json-smart 2.5.1). Elles ne peuvent pas être corrigées par l'image Docker. Leur correction passe par la montée de version de Spring Boot, inscrite au plan de remédiation (section 5.6) et au plan de mise à jour (section 8).
+**Interprétation :** les images de base retenues sont **saines** (aucune vulnérabilité système). Les vulnérabilités restantes du back proviennent **exclusivement des dépendances de l'application** figées par **Spring Boot 3.2.5** (Tomcat embarqué 10.1.20, Jackson 2.15.4, json-smart 2.5.1). Elles ne peuvent pas être corrigées par l'image Docker. Leur correction passe par la montée de version de Spring Boot, inscrite au plan de remédiation (section 5.7) et au plan de mise à jour (section 8).
 
 ### 3.2 docker-compose.yml
 
@@ -340,7 +340,7 @@ Le déploiement continu est assuré par les jobs `docker` et `deploy` du workflo
    - tag Git `v*` : le nom du tag, par exemple `v1.0.0`.
 2. **Build** : `docker compose build`.
 3. **Smoke test** : `docker compose up -d --wait` démarre la pile et attend les healthchecks, puis deux requêtes `curl` vérifient l'API (`/persons`) et le front. En cas d'échec, les logs des conteneurs sont affichés et le job échoue. **Aucune image défaillante n'est publiée.**
-4. **Scan Trivy** des deux images (vulnérabilités hautes/critiques et secrets), résultat affiché dans les logs. Il est **non bloquant** : les vulnérabilités connues du back viennent de Spring Boot 3.2.5 et ne peuvent être corrigées que par une montée de version (section 5.6).
+4. **Scan Trivy** des deux images (vulnérabilités hautes/critiques et secrets), résultat affiché dans les logs. Il est **non bloquant** : les vulnérabilités connues du back viennent de Spring Boot 3.2.5 et ne peuvent être corrigées que par une montée de version (section 5.7).
 5. **Publication sur GitHub Container Registry** (uniquement pour un push sur `main` ou un tag `v*`) :
    - `ghcr.io/brunohoarau/microcrm-back:<IMAGE_TAG>` et `ghcr.io/brunohoarau/microcrm-front:<IMAGE_TAG>` ;
    - sur `main`, le tag **`latest`** est en plus déplacé vers cette version ;
@@ -456,26 +456,26 @@ SonarQube Cloud est la **porte de qualité et de sécurité** du pipeline :
 
 **Types de problèmes surveillés**
 
-| Catégorie Sonar | Ce qui est détecté | Exemples possibles dans MicroCRM |
+| Catégorie Sonar | Ce qui est détecté | Constaté dans MicroCRM (section 5.4) |
 |---|---|---|
-| **Vulnérabilités** | Failles exploitables (injection, configuration dangereuse…) | – |
-| **Security Hotspots** | Code sensible à revoir manuellement | CORS ouvert à `*` |
-| **Bugs** (fiabilité) | Comportements erronés | `Optional.get()` sans vérification |
-| **Code smells** (maintenabilité) | Dette technique, mauvaises pratiques | Dépendance dupliquée, injection de champs `final = null` |
-| **Couverture** | Part du code exécutée par les tests | ~31 % front, non mesurée back |
-| **Duplications** | Code copié-collé | Tests de composants similaires |
+| **Vulnérabilités** | Failles exploitables (injection, configuration dangereuse…) | CORS ouvert à toutes les origines, ressource CDN sans contrôle d'intégrité |
+| **Security Hotspots** | Code sensible à revoir manuellement | Aucun |
+| **Bugs** (fiabilité) | Comportements erronés | 16 promesses non gérées, formulaires non accessibles (front) |
+| **Code smells** (maintenabilité) | Dette technique, mauvaises pratiques | Opération asynchrone dans un constructeur, injection par champ |
+| **Couverture** | Part du code exécutée par les tests | 67 % back, 27 % front |
+| **Duplications** | Code copié-collé | Bloc d'horodatage dupliqué entre `Person` et `Organization` (7,6 % du back) |
 
-*Les résultats réels de la première analyse seront reportés ici (section 5.4).*
+Les résultats détaillés et les alertes prioritaires figurent en section 5.4.
 
 ### 5.2 Bonnes pratiques OWASP appliquées au projet
 
 | Risque OWASP Top 10 | Constat dans MicroCRM | Mesure prévue |
 |---|---|---|
 | A01 – Contrôle d'accès défaillant | API sans authentification (GET, POST, PATCH, DELETE publics) | Documenté comme risque ; authentification à prévoir (Spring Security) en évolution |
-| A05 – Mauvaise configuration de sécurité | CORS `*`, conteneurs en `root` | Restreindre les origines CORS, utilisateur non-root dans les images |
-| A06 – Composants vulnérables et obsolètes | Angular 17 et Spring Boot 3.2 hors support, 90 vulnérabilités npm | Dependabot, `npm audit`, scan Trivy, plan de mise à jour |
-| A08 – Intégrité des logiciels et des données | Images de base non versionnées, chaîne CI à sécuriser | Images figées, actions épinglées, `npm ci` sur lockfile, validation du wrapper Gradle |
-| A09 – Journalisation et surveillance insuffisantes | Pas de supervision | Logs des conteneurs, notifications d'échec du pipeline |
+| A05 – Mauvaise configuration de sécurité | CORS `*` (SonarQube `java:S5122`), conteneurs en `root` | Conteneurs non-root ✅ ; restriction du CORS planifiée (section 5.7) |
+| A06 – Composants vulnérables et obsolètes | Angular 17 et Spring Boot 3.2 hors support, 75 CVE dans l'image back (Trivy), 8 vulnérabilités npm en production | Dependabot ✅, `npm audit` ✅, scan Trivy ✅ ; migration planifiée (section 5.7) |
+| A08 – Intégrité des logiciels et des données | Images de base non versionnées, CDN sans SRI (SonarQube `Web:S5725`) | Images figées ✅, actions épinglées ✅, `npm ci` ✅, validation du wrapper Gradle ✅ ; SRI planifié |
+| A09 – Journalisation et surveillance insuffisantes | Pas de supervision | Logs centralisés dans ELK ✅, tableau de bord ✅, notifications d'échec du pipeline ✅ ; alertes Kibana à définir |
 
 ### 5.3 Bonnes pratiques attendues dans la CI
 
@@ -485,7 +485,7 @@ SonarQube Cloud est la **porte de qualité et de sécurité** du pipeline :
 - La publication sur GHCR utilise le **`GITHUB_TOKEN`** éphémère fourni par GitHub : aucun identifiant de registre à stocker.
 - **Permissions minimales** déclarées dans chaque workflow (`permissions: contents: read` par défaut, `packages: write` uniquement pour le job de publication).
 - Pas de déclencheur `pull_request_target` : le code des forks ne s'exécute pas avec les secrets.
-- Le secret scanning et la push protection de GitHub sont activés sur le dépôt.
+- Le secret scanning et la push protection de GitHub sont à activer dans les paramètres du dépôt (*Settings → Code security*).
 
 **Gestion des dépendances**
 
@@ -500,24 +500,135 @@ SonarQube Cloud est la **porte de qualité et de sécurité** du pipeline :
 
 ### 5.4 Résultats SonarQube
 
-*À compléter après la première analyse : vulnérabilités identifiées, code smells critiques, zones de complexité, couverture des tests.*
+Analyse de la branche `main` du 06/11/2026 (commit `4ccbfd4`), sur les deux projets SonarQube Cloud. Profils de règles **« Sonar way »** (Java, TypeScript, HTML).
 
-### 5.5 Analyse des risques
+#### Synthèse
 
-| Risque | Probabilité | Impact | Mesure |
+| Indicateur | Back-end (Java) | Front-end (Angular) |
+|---|---|---|
+| Quality Gate | ✅ OK | ✅ OK |
+| Lignes de code | 270 | 733 |
+| **Vulnérabilités** | **3** (majeures) – note sécurité **C** | **1** (mineure) – note sécurité **B** |
+| Security Hotspots | 0 | 0 |
+| **Bugs** (fiabilité) | 0 – note A | **24** (majeurs) – note fiabilité **C** |
+| **Code smells** (maintenabilité) | 2 – note A | 9 (dont 1 critique) – note A |
+| **Duplications** | **7,6 %** (28 lignes, 2 blocs) | 0 % |
+| Complexité cyclomatique / cognitive | 37 / 6 | 58 / 15 |
+| **Couverture des tests** | **67 %** (89 lignes à couvrir, 28 non couvertes) | **27 %** (120 lignes à couvrir, 84 non couvertes) |
+| Dette technique | 10 min (ratio 0,1 %) | 39 min (ratio 0,2 %) |
+
+> **Vulnérabilité ou code smell : deux gravités différentes.** Une **vulnérabilité** est une faiblesse **exploitable par un attaquant** : elle met en jeu la confidentialité, l'intégrité ou la disponibilité, et se traite en priorité. Un **bug** est un comportement incorrect du programme. Un **code smell** est un défaut de **maintenabilité** (lisibilité, conception) **sans impact direct sur la sécurité** : il augmente le coût et le risque des évolutions futures. Un code smell « critique » reste donc moins urgent qu'une vulnérabilité « majeure ».
+
+#### Vulnérabilités
+
+| Règle | Gravité | Emplacement | Constat |
 |---|---|---|---|
-| Fuite d'un secret dans le code ou les logs | Moyenne | Élevé | GitHub Secrets, masquage automatique, push protection |
-| Dépendance vulnérable ou obsolète | **Élevée** (constatée) | Élevé | Dependabot, audit nightly, plan de mise à jour |
-| Accès non autorisé à l'API | Élevée si exposée | Élevé | Usage interne uniquement ; authentification en évolution |
-| Image Docker non reproductible ou vulnérable | Moyenne | Moyen | Versions figées, scan Trivy |
-| Action GitHub compromise | Faible | Élevé | Actions officielles, versions épinglées, permissions minimales |
-| Perte des données (base en mémoire) | **Certaine** à chaque redémarrage | Moyen | Base persistante + sauvegarde (section 7) |
+| `java:S5122` – la politique CORS doit être restreinte à des origines de confiance | Majeure | `SpringDataRestCustomization.java` (`allowedOrigins("*")`), `PersonRepository.java` et `OrganizationRepository.java` (`@CrossOrigin`) | **N'importe quel site web** peut appeler l'API depuis le navigateur d'un utilisateur, y compris pour créer, modifier ou supprimer des données (`POST`, `PATCH`, `DELETE` autorisés) |
+| `Web:S5725` – ressource distante utilisée sans contrôle d'intégrité | Mineure | `front/src/index.html` : feuille de style Bulma chargée depuis `cdn.jsdelivr.net` sans attribut `integrity` | Si le CDN est compromis, un contenu malveillant peut être injecté dans l'application (attaque de la chaîne d'approvisionnement) |
 
-### 5.6 Plan d'action et de remédiation
+#### Duplications de code
 
-- **Actions immédiates** (avec la mise en place du pipeline) : secrets dans GitHub Secrets, permissions minimales, images de base figées, utilisateur non-root, Quality Gate active, Dependabot.
-- **Court terme** : corriger les vulnérabilités npm et les problèmes bloquants remontés par SonarQube, restreindre le CORS, augmenter la couverture des tests.
-- **Long terme** : migrer vers des versions supportées (Angular 20+, Spring Boot 4.x, Java 21/25, Gradle 9), ajouter une authentification sur l'API et une base persistante.
+| Fichiers | Lignes | Constat |
+|---|---|---|
+| `Person.java` ↔ `Organization.java` | 14 + 14 | Bloc d'horodatage identique : champs `createdAt` / `updatedAt` (`@CreationTimestamp`, `@UpdateTimestamp`) et leurs accesseurs. C'est l'unique duplication, mais elle représente 7,6 % du back, qui est petit. |
+
+#### Zones de complexité
+
+La complexité reste **faible** sur l'ensemble du code (complexité cognitive totale : 6 pour le back, 15 pour le front ; aucune fonction ne dépasse le seuil Sonar de 15). Les zones les plus complexes sont aussi les **moins testées** :
+
+| Fichier | Complexité cyclomatique / cognitive | Couverture | Commentaire |
+|---|---|---|---|
+| `front/.../person-details.component.ts` | **21 / 7** | 26,7 % | Composant le plus complexe : chargement, création, enregistrement, gestion des organisations ; concentre 8 des 16 promesses non gérées et l'unique code smell critique |
+| `front/.../organization-details.component.ts` | 11 / 4 | 36 % | Même structure que `person-details` |
+| `back/.../Person.java` | 17 / 1 | 45 % | Complexité due au nombre d'accesseurs, pas à la logique |
+| `front/.../organization.service.ts` / `person.service.ts` | 9 / 2 et 7 / 2 | **12,5 % / 14,8 %** | Toute la communication avec l'API, quasiment pas testée |
+
+#### Règles violées (alertes prioritaires)
+
+Les **15 alertes prioritaires** ci-dessous combinent les résultats de SonarQube et ceux des autres outils du pipeline (Trivy, `npm audit`) et d'ELK. SonarQube Cloud n'analyse pas les CVE des dépendances : les autres outils complètent ses résultats. Elles sont classées par gravité et par risque réel pour MicroCRM.
+
+| # | Source | Type | Règle / constat | Gravité | Occurrences | Emplacement |
+|---|---|---|---|---|---|---|
+| 1 | Trivy | Vulnérabilité (dépendance) | CVE de Tomcat 10.1.20, Jackson 2.15.4, json-smart (Spring Boot 3.2.5, hors support) | **9 critiques, 33 hautes** | 75 | Image `microcrm-back` |
+| 2 | Revue / OWASP A01 | Vulnérabilité (conception) | API sans authentification ni autorisation | Haute | – | Toute l'API REST |
+| 3 | SonarQube | Vulnérabilité | `java:S5122` CORS ouvert à toutes les origines | Majeure | 3 | `SpringDataRestCustomization`, repositories |
+| 4 | `npm audit` | Vulnérabilité (dépendance) | Dépendances de production du front vulnérables (Angular 17 hors support) | 4 hautes, 4 moyennes | 8 | `front/package-lock.json` |
+| 5 | ELK | Bug (robustesse) | Identifiant non numérique → **HTTP 500** au lieu de 400 | Haute (fiabilité) | 11 erreurs/249 req. | `GET /persons/{id}` |
+| 6 | SonarQube | Vulnérabilité | `Web:S5725` ressource CDN sans intégrité (SRI) | Mineure | 1 | `front/src/index.html` |
+| 7 | SonarQube | Bug | `typescript:S9383` promesses non gérées (aucun traitement d'erreur) | Majeure | 16 | Composants `main-dashboard`, `person-details`, `organization-details` |
+| 8 | SonarQube | Code smell | `typescript:S7059` opération asynchrone dans un constructeur | **Critique** | 1 | `person-details.component.ts:33` |
+| 9 | SonarQube | Bug (accessibilité) | `Web:InputWithoutLabelCheck` champs de saisie sans libellé associé | Majeure | 7 | Formulaires `person-details`, `organization-details` |
+| 10 | SonarQube | Code smell (accessibilité) | `Web:S6853` libellés sans contrôle associé | Majeure | 6 | Mêmes formulaires |
+| 11 | SonarQube | Bug (accessibilité) | `Web:S5256` tableau sans en-têtes | Majeure | 1 | `person-details.component.html:179` |
+| 12 | SonarQube | Code smell | `java:S6813` injection de dépendances par champ | Majeure | 2 | `InitialDataFixture.java` |
+| 13 | SonarQube | Duplication | Bloc d'horodatage dupliqué | – | 28 lignes | `Person.java`, `Organization.java` |
+| 14 | SonarQube | Couverture | Services Angular quasiment non testés | – | 12–15 % | `person.service.ts`, `organization.service.ts` |
+| 15 | SonarQube | Code smell | `typescript:S7773` `parseInt` global au lieu de `Number.parseInt` | Mineure | 2 | Composants de détail |
+
+### 5.5 Croisement SonarQube × ELK × Trivy
+
+| Observation ELK / Trivy | Zone de code concernée | Lien avec SonarQube | Enseignement |
+|---|---|---|---|
+| **11 erreurs 500** sur `GET /persons/abc` (100 % des erreurs du back) | Conversion de l'identifiant par Spring Data REST, sans gestion d'erreur dédiée | **Non détecté** par SonarQube : le défaut vient du comportement du framework, pas d'une règle de code | Les logs révèlent des défauts invisibles à l'analyse statique ; il faut un test d'API qui vérifie la réponse 400 |
+| **18 erreurs 404** (`/persons/99999`) côté API | Les services Angular (`fetchById`) rejettent alors leur promesse | **16 promesses non gérées** (S9383) dans les composants qui appellent ces services | Pour l'utilisateur, une 404 ou une 500 se traduit par une **page vide, sans message**. Ces erreurs, invisibles dans ELK (elles se produisent dans le navigateur), sont exactement celles que signale SonarQube |
+| Services front et entités back **peu couverts** (12–45 %) | `person.service.ts`, `organization.service.ts`, `Person.java` | Couverture faible des zones les plus sollicitées (table « Requêtes HTTP par chemin » : `/persons`, `/persons/1` en tête du trafic) | Les chemins les plus utilisés sont les moins testés : priorité des nouveaux tests |
+| **75 CVE** dans l'image back (Tomcat, Jackson) | Dépendances figées par Spring Boot 3.2.5 | Non couvert par SonarQube (pas d'analyse des dépendances dans l'offre gratuite) ; note sécurité C uniquement due au CORS | SonarQube et Trivy sont **complémentaires** : code d'un côté, dépendances et images de l'autre |
+| Échecs des PR Dependabot Spring Boot 4 / Angular 22 (section 6.3) | Build back et `npm ci` front | – | La correction des CVE passe par une **migration majeure planifiée**, pas par une simple mise à jour |
+
+### 5.6 Analyse des risques
+
+| Risque | Probabilité | Impact | État / mesure |
+|---|---|---|---|
+| Exploitation d'une vulnérabilité d'une dépendance (Tomcat, Jackson, Angular) | **Élevée** (75 CVE connues) | Élevé | Détecté par Trivy et `npm audit` ; correction par migration (plan ci-dessous) |
+| Accès ou modification non autorisés des données (API sans authentification, CORS `*`) | Élevée si l'API est exposée hors du réseau interne | Élevé | Usage interne ; restriction CORS à court terme, authentification à moyen terme |
+| Injection de contenu via le CDN (pas de SRI) | Faible | Élevé | Ajout du contrôle d'intégrité |
+| Erreurs non gérées (500, promesses rejetées) : indisponibilité perçue, messages d'erreur techniques | Moyenne (constatée dans ELK) | Moyen | Gestion des erreurs côté API et front |
+| Fuite d'un secret dans le code ou les logs | Faible | Élevé | GitHub Secrets, masquage automatique ; aucun secret détecté par Trivy ; en-têtes sensibles non journalisés |
+| Action GitHub ou image de base compromise | Faible | Élevé | Actions officielles épinglées, images officielles figées, permissions minimales |
+| Régression non détectée (couverture 27 % front) | Moyenne | Moyen | Quality Gate sur le nouveau code (80 %), tests supplémentaires |
+| Perte des données (base en mémoire) | **Certaine** à chaque redémarrage | Moyen | Base persistante et sauvegarde (section 7) |
+
+### 5.7 Plan d'action et de remédiation
+
+**Déjà en place (mise en œuvre du pipeline) :** secrets dans GitHub Secrets, permissions minimales, images officielles figées et non-root, Quality Gate bloquante, Dependabot, scan Trivy, `npm audit`, logs centralisés.
+
+**Actions immédiates (refactoring léger, < 1 jour) :**
+
+| Action | Alertes traitées | Mise en œuvre |
+|---|---|---|
+| Restreindre le CORS à l'origine du front | #3 (`java:S5122`) | Supprimer les `@CrossOrigin` des repositories ; dans `SpringDataRestCustomization`, remplacer `"*"` par une liste d'origines lue dans la configuration (par exemple `app.cors.allowed-origins=https://localhost`), surchargeable par variable d'environnement dans `docker-compose.yml` |
+| Contrôle d'intégrité de Bulma | #6 (`Web:S5725`) | Ajouter `integrity="sha384-…"` et `crossorigin="anonymous"` à la balise `<link>`, ou mieux, installer Bulma via npm (`angular.json` → `styles`) pour supprimer la dépendance au CDN |
+| Réponse 400 pour un identifiant invalide | #5 (ELK) | `@RestControllerAdvice` traitant `MethodArgumentTypeMismatchException` / `ConversionFailedException`, plus un test `MockMvc` qui vérifie le statut 400 |
+| Gestion des erreurs dans les composants Angular | #7, #8 | Ajouter `.catch()` (ou `try/await/catch`) avec un message d'erreur affiché ; déplacer le chargement des organisations du constructeur vers `ngOnInit` |
+| Injection par constructeur, `Number.parseInt` | #12, #15 | Corrections mécaniques |
+
+**Court terme (sprint suivant) :**
+
+- **Tests supplémentaires** :
+  - services Angular avec `HttpTestingController` (succès, 404, 500) ;
+  - tests `MockMvc` des endpoints REST (`/persons`, `/organizations`, cas d'erreur) ;
+  - tests des entités (association personne ↔ organisation).
+
+  Objectif : **≥ 60 % de couverture globale front et ≥ 80 % back**.
+- **Suppression de la duplication** : extraire `createdAt` / `updatedAt` dans une classe `@MappedSuperclass` (`AuditableEntity`) héritée par `Person` et `Organization` (#13).
+- **Accessibilité des formulaires** : associer chaque `<label for>` à un `id` de champ, ajouter des `<th>` (#9, #10, #11).
+- **Règles SonarQube plus strictes** : créer une Quality Gate personnalisée « MicroCRM » à partir de « Sonar way », avec en plus :
+  - **aucune nouvelle vulnérabilité, quelle que soit sa gravité** ;
+  - **note de sécurité globale ≥ B** (bloquante une fois le CORS corrigé) ;
+  - **100 % des security hotspots revus** ;
+  - **couverture globale ≥ 50 %** (seuil relevé progressivement).
+- **Pipeline** : rendre le scan Trivy **bloquant sur les vulnérabilités critiques corrigeables** lors d'une release (tag `v*`), et activer les **Dependabot security updates** et la **push protection** du secret scanning dans les paramètres du dépôt.
+
+**Moyen et long terme :**
+
+- **Migration des frameworks** (corrige les alertes #1 et #4) :
+  - Spring Boot 3.2 → 3.5 (LTS commerciale) puis 4.x ;
+  - Angular 17 → 20+, une version majeure à la fois (`ng update`).
+
+  Chaque étape passe par le pipeline, qui valide build, tests et Quality Gate.
+- **Authentification de l'API** (#2) : Spring Security (OAuth2/OIDC ou session), rôles en lecture et en écriture, protection CSRF si l'authentification utilise des cookies.
+- **Base de données persistante** avec sauvegarde (section 7).
+- **Collecte des erreurs du navigateur** (Elastic APM RUM) pour compléter le croisement ELK × SonarQube côté front.
 
 ---
 
@@ -561,6 +672,7 @@ Les logs du back-end (Spring Boot) et du front-end (serveur Caddy) sont centrali
 | `input { gelf { port => 12201 } }` | Réception des logs des conteneurs |
 | `mutate rename tag → service` | Service d'origine (`back` ou `front`), fourni par l'option `tag` du pilote GELF |
 | `json { source => "message" }` | Lecture de la ligne JSON : chaque champ devient un champ indexé |
+| `drop` des logs `admin.api` | Les appels du healthcheck Docker à l'API d'administration de Caddy sont ignorés (bruit de fond de 6 logs/min, voir section 6.3) |
 | Bloc `front` | Champs Caddy ramenés au format du back (`http_method`, `url_path`, `http_status`, `duration_ms` en millisecondes) |
 | Niveau | Niveau déduit du statut HTTP (5xx → ERROR, 4xx → WARN) ; niveau syslog numérique des lignes non JSON converti (stderr → ERROR) |
 | `output { elasticsearch }` | Un index par jour, `microcrm-logs-AAAA.MM.JJ`, avec un **modèle d'index** (`elk/logstash/templates/microcrm-logs.json`) qui type les champs (`http_status` entier, `duration_ms` décimal, `level` et `service` mots-clés) |
@@ -627,11 +739,95 @@ Le tableau de bord affiche par défaut la dernière heure et se rafraîchit tout
 
 ### 6.2 Métriques DORA
 
-*À compléter.*
+> **Tableau provisoire.** Il s'appuie sur les mesures relevées entre le 05/11/2026 (premier pipeline) et le 06/11/2026 : **29 exécutions** du workflow GitHub Actions (9 sur `main`, 20 sur des branches Dependabot), dont **2 déploiements**. L'historique est encore court : les valeurs devront être recalculées sur une période plus longue (par exemple un mois glissant).
 
-### 6.3 KPI personnalisés et synthèse
+#### Sources et méthode de collecte
 
-*À compléter.*
+| Origine | Source | Données utilisées |
+|---|---|---|
+| **Pipeline (CI/CD)** | Historique GitHub Actions (onglet *Actions*, ou API `GET /repos/{owner}/{repo}/actions/runs` et `.../runs/{id}/attempts/{n}/jobs`) | Date du commit, début et fin de chaque job et de chaque étape, résultat, tentatives (re-run) |
+| **Pipeline (qualité)** | SonarQube Cloud (tableau de bord du projet, ou API `api/measures/component`) | Quality Gate, couverture, bugs, vulnérabilités, code smells, duplications |
+| **Application** | ELK : index `microcrm-logs-*` (tableau de bord Kibana, ou agrégations Elasticsearch) | Niveaux de log, statuts HTTP, durées des requêtes, volume par minute |
+
+**Définitions retenues dans le contexte du projet :**
+
+- **Déploiement** : exécution réussie du job `deploy` (environnement GitHub `production`), soit un push sur `main` ou un tag `v*` ayant passé toute la chaîne.
+- **Changement** : un commit arrivé sur `main`.
+- **Incident** : période pendant laquelle le pipeline de `main` est en échec (version non livrable), ou défaillance d'une version déployée.
+
+#### Résultats
+
+| Métrique DORA | Méthode de calcul | Valeur mesurée | Niveau DORA* |
+|---|---|---|---|
+| **Deployment Frequency** (fréquence de déploiement) | Nombre de jobs `deploy` réussis ÷ période d'observation | **2 déploiements le 06/11** (`2b2fd06` à 10:48, `4ccbfd4` à 11:49). Chaque commit arrivé sur `main` est déployé automatiquement | Élite (à la demande, plusieurs fois par jour) |
+| **Lead Time for Changes** (délai de mise en production) | Fin du job `deploy` − date du commit, pour chaque commit déployé ; médiane | `4ccbfd4` : **3 min 53 s** · `2b2fd06` : 36 min 12 s · `6800594` : 36 min 28 s → **médiane 36 min 12 s**. Sans incident, le délai **nominal est de 3 min 53 s** | Élite (< 1 jour) |
+| **Change Failure Rate** (taux d'échec des changements) | Déploiements ayant provoqué une défaillance en production ÷ déploiements | **0 / 2 = 0 %**. En revanche, **2 des 3 commits** arrivés sur `main` depuis la mise en place du CD ont fait **échouer le pipeline avant le déploiement** : défaillances bloquées par la chaîne, aucune version défectueuse déployée | Élite (0–15 %) |
+| **MTTR** (temps de restauration) | Fin du premier run en échec sur `main` → fin du run suivant revenu au vert ; moyenne des incidents | Incident 1 (05/11, première analyse SonarQube sans référence) : **12 min 36 s** · Incident 2 (06/11, fichiers oubliés dans un commit puis paquet GHCR non autorisé) : **34 min 43 s** → **moyenne 23 min 40 s**. Aucun incident en production | Élite (< 1 heure) |
+
+\* Niveaux de référence du rapport *State of DevOps* (DORA) : Élite, Haut, Moyen, Faible.
+
+### 6.3 KPI opérationnels et analyse
+
+#### KPI issus du pipeline (CI/CD)
+
+| KPI | Méthode de calcul | Valeur mesurée | Objectif proposé |
+|---|---|---|---|
+| **Durée totale du pipeline** (push → déploiement) | Début du premier job → fin du job `deploy` (run nominal `4ccbfd4`) | **3 min 43 s** : CI back et front en parallèle 1 min 14 s, images 1 min 59 s, déploiement 25 s | < 10 min |
+| **Temps de build** | Médiane des étapes de build sur les runs réussis | Back (build + tests) : **24 s** · Front : `npm ci` **16 s** + `ng build` **5 s** · Images Docker (`docker compose build`) : **55 s** | Back < 2 min, front < 1 min |
+| **Temps des tests** | Médiane des étapes de test (n = 21 back, 22 front) | Tests front (Karma, 8 tests) : **16 s** · Back : tests inclus dans l'étape build (24 s, 6 tests) · Smoke test Docker : < 1 s · Analyse SonarQube : **30 s** (back) / **41 s** (front) | 100 % des tests réussis sur `main` |
+| **Qualité SonarQube** | Tableau de bord SonarQube Cloud (dernière analyse de `main`) | Quality Gate **OK** sur les 2 projets · Back : couverture **67 %**, 0 bug, **3 vulnérabilités** (note sécurité C), duplication 7,6 % · Front : couverture **27 %**, **24 bugs** (note fiabilité C), 1 vulnérabilité, 9 code smells | Quality Gate verte ; couverture ≥ 80 % sur le nouveau code |
+| **Taux de réussite du pipeline** | Runs réussis ÷ runs exécutés | Global : **15 / 29 = 52 %** · `main` : 5 / 9 (56 %) · Branches Dependabot : 10 / 20 (50 %) | ≥ 90 % sur `main` |
+
+#### KPI issus de l'application (ELK)
+
+Mesures sur l'index `microcrm-logs-*` (06/11, 11:32 → 11:51 UTC, 603 logs), avec le trafic de démonstration de `elk/generate-traffic.sh`, qui provoque volontairement des erreurs 404 et 500.
+
+| KPI | Méthode de calcul | Valeur mesurée | Seuil d'alerte proposé |
+|---|---|---|---|
+| **Taux d'erreurs applicatives** | Logs `level: ERROR` ÷ total des logs | **12 / 603 = 2,0 %** (11 back, 1 front) | > 1 % sur 15 min hors tests |
+| **Taux de réponses 5xx de l'API** | Requêtes du back avec `http_status ≥ 500` ÷ requêtes du back | **11 / 249 = 4,4 %** (toutes sur `/persons/abc`) · 4xx : 18 (7,2 %) | > 1 % |
+| **Temps de réponse de l'API** | Percentiles de `duration_ms` (service `back`) | p50 **18 ms** · p95 **60 ms** · p99 196 ms · max 551 ms | p95 > 200 ms |
+| **Fréquence des événements** | Histogramme du nombre de logs par minute | Moyenne 32 logs/min, **pic de 183 logs/min** (11:36, avec 6 erreurs) pendant la génération de trafic | Pic d'erreurs > 10/min |
+
+#### Analyse commentée
+
+**Performance du pipeline.**
+- La chaîne complète, du push au déploiement, dure **moins de 4 minutes**, et la partie CI à elle seule environ **1 minute** grâce aux jobs back et front exécutés en parallèle et aux caches Gradle et npm.
+- Le poste le plus long est le **job Docker (≈ 2 min)** : build des images (55 s) et **scan Trivy (38 s)**, qui télécharge sa base de vulnérabilités à chaque run. Mettre cette base en cache est la première optimisation possible.
+- L'analyse **SonarQube** (30 à 40 s par projet) est le second poste, en partie à cause de l'attente de la Quality Gate.
+- Ces temps permettent un retour rapide au développeur et un **lead time nominal inférieur à 4 minutes**.
+
+**Fiabilité du pipeline.**
+- Le taux de réussite global (52 %) est bas, mais il s'explique.
+- **Sur `main`**, les 4 échecs correspondent à la **mise en place** du pipeline :
+  - première analyse SonarQube sans référence ;
+  - fichiers oubliés dans un commit (`6800594`) ;
+  - paquet GHCR créé par un autre dépôt, deux fois (tentative initiale puis relance).
+
+  Chaque cause a été corrigée et documentée. Depuis, le pipeline de `main` est au vert. Le **MTTR** (23 min 40 s en moyenne) correspond surtout au temps de diagnostic de ces erreurs de configuration.
+- **Sur les branches Dependabot**, les échecs montrent que **le pipeline joue son rôle de garde-fou**. Les mises à jour majeures incompatibles sont bloquées avant la fusion :
+  - Spring Boot 4.1.2 et Gradle 9.8.2 cassent le build du back ;
+  - Angular 22 (`forms`, `platform-browser-dynamic`) est rejeté par `npm ci` (dépendances incompatibles avec Angular 17).
+
+  Les mises à jour mineures (rxjs, karma, Alpine…) passent. Ces échecs ne sont pas des défaillances, mais l'indicateur concret de la **dette de mise à jour** : Angular et Spring Boot doivent être migrés de manière planifiée (section 8).
+
+**Qualité.**
+- La Quality Gate est verte, car elle ne porte que sur le nouveau code.
+- La dette existante reste visible : couverture front faible (27 %), 24 bugs de fiabilité côté front, et des vulnérabilités côté back liées aux dépendances obsolètes (également signalées par Trivy).
+
+**Lien entre les indicateurs ELK et la fiabilité.**
+- Les **erreurs 500** relevées par ELK proviennent toutes de `GET /persons/abc`. Un identifiant non numérique provoque une erreur serveur au lieu d'une erreur 400 : c'est un **défaut de gestion des erreurs de l'API**, à corriger, puis à couvrir par un test pour qu'il ne revienne pas.
+- Les **pics de latence** (281 à 551 ms) coïncident exactement avec les **redémarrages du back** : c'est le préchauffage de la JVM au premier appel. Ils sont sans conséquence en régime établi (p95 = 60 ms), mais ils montrent qu'un déploiement provoque une brève dégradation. Un appel de préchauffage après le démarrage, ou un déploiement sans interruption, la supprimerait.
+- L'analyse du volume par minute a révélé **un bruit de fond de 6 logs par minute** au repos : les appels du healthcheck Docker à l'API d'administration de Caddy. Ce bruit faussait les indicateurs de volume et de fréquence ; il est désormais **filtré dans Logstash** (`logger == "admin.api"`). De même, les logs de Caddy avaient révélé une erreur au démarrage, corrigée (section 6.1).
+- Les KPI ELK permettent ainsi de rattacher la fiabilité perçue par l'utilisateur (erreurs, temps de réponse) aux événements du pipeline (déploiements, redémarrages).
+
+**Pistes d'amélioration :**
+- mettre en cache la base Trivy ;
+- corriger l'erreur 500 sur les identifiants invalides ;
+- augmenter la couverture du front ;
+- planifier la migration Angular et Spring Boot ;
+- automatiser ces calculs : un script interrogeant l'API GitHub, ou l'export des événements du pipeline dans ELK ;
+- définir des alertes Kibana sur les seuils proposés.
 
 ---
 
