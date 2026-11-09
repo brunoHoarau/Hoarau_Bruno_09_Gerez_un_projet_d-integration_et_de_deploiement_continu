@@ -13,7 +13,7 @@ L'application MicroCRM est une implémentation simplifiée d'un ["CRM" (Customer
 ![Page d'accueil](./misc/screenshots/screenshot_1.png)
 ![Édition de la fiche d'un individu](./misc/screenshots/screenshot_2.png)
 
-**Sommaire** : [Organisation](#organisation) · [Prérequis](#prérequis) · [Démarrer avec les sources](#démarrer-avec-les-sources) · [Tests](#exécution-des-tests) · [Docker](#conteneurs-docker) · [Pipeline CI/CD](#pipeline-cicd) · [Configuration](#configuration-du-pipeline) · [Déploiement](#déploiement) · [Logs (ELK)](#centralisation-des-logs-elk) · [Accès aux outils](#accès-aux-outils) · [Documentation](#documentation)
+**Sommaire** : [Organisation](#organisation) · [Prérequis](#prérequis) · [Démarrer avec les sources](#démarrer-avec-les-sources) · [Tests](#exécution-des-tests) · [Docker](#conteneurs-docker) · [Pipeline CI/CD](#pipeline-cicd) · [Configuration](#configuration-du-pipeline) · [Déploiement](#déploiement) · [Logs (ELK)](#centralisation-des-logs-elk) · [Accès aux outils](#accès-aux-outils)
 
 ## Organisation
 
@@ -29,7 +29,7 @@ Ce [monorepo](https://en.wikipedia.org/wiki/Monorepo) contient :
 | `.github/workflows/ci.yml` | Pipeline CI/CD GitHub Actions |
 | `.github/dependabot.yml` | Mises à jour automatiques des dépendances |
 | `misc/docker/Caddyfile` | Configuration du serveur web du front |
-| `docs/` | Documentation technique (Markdown et Word), captures et graphiques |
+| `docs/` | Documentation technique et captures |
 
 ## Prérequis
 
@@ -187,9 +187,3 @@ Dans Kibana (http://localhost:5601), ouvrir *Tableaux de bord*, puis **MicroCRM 
 | Elasticsearch (local, avec ELK) | http://localhost:9200 (ex. http://localhost:9200/_cat/indices?v) |
 
 Les adresses locales ne répondent que lorsque l'application est lancée (et, pour Kibana et Elasticsearch, la stack ELK). Elles ne sont accessibles que depuis la machine elle-même.
-
-## Documentation
-
-- [Documentation technique (Markdown)](docs/documentation-technique.md) : version complète
-- [Documentation technique (Word)](docs/documentation-technique.docx) : version complète
-- [Synthèse (Word, 10 à 15 pages)](docs/documentation-technique-synthese.docx)
