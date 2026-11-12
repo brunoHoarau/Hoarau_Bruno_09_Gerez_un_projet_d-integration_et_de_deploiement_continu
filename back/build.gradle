@@ -24,7 +24,7 @@ dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-data-rest'
 	implementation 'ro.polak:spring-boot-data-fixtures:0.2.0'
 	// Logs au format JSON (profil "json-logs", centralisation ELK). 7.4 = dernière version compatible logback 1.4
-	implementation 'net.logstash.logback:logstash-logback-encoder:7.4'
+	implementation 'net.logstash.logback:logstash-logback-encoder:9.0'
 	testImplementation 'org.springframework.boot:spring-boot-starter-test'
 	runtimeOnly 'org.hsqldb:hsqldb'
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
