@@ -9,7 +9,7 @@
 # ---------------------------------------------------------------------------
 # Étape de build du front-end (Node.js LTS)
 # ---------------------------------------------------------------------------
-FROM node:24.22-alpine3.24 AS front-build
+FROM node:26.12-alpine3.24 AS front-build
 
 ENV NG_CLI_ANALYTICS=false
 
