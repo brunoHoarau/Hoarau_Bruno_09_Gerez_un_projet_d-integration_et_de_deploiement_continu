@@ -25,7 +25,7 @@ RUN npx ng build --configuration production
 # ---------------------------------------------------------------------------
 # Étape de build du back-end (JDK 21)
 # ---------------------------------------------------------------------------
-FROM eclipse-temurin:21-jdk-alpine-3.24 AS back-build
+FROM eclipse-temurin:24-jdk-alpine-3.22 AS back-build
 
 WORKDIR /src
 
@@ -65,7 +65,7 @@ CMD ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile
 # ---------------------------------------------------------------------------
 # Image d'exécution du back-end : JRE seul (pas de JDK ni de Gradle)
 # ---------------------------------------------------------------------------
-FROM eclipse-temurin:21-jre-alpine-3.24 AS back
+FROM eclipse-temurin:24-jre-alpine-3.22 AS back
 
 RUN addgroup -S app && adduser -S -G app app
 
